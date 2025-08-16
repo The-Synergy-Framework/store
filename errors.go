@@ -3,6 +3,9 @@ package store
 import (
 	"errors"
 	"fmt"
+	"strings"
+
+	"core/validation"
 )
 
 // Sentinel errors for common storage operations.
@@ -276,6 +279,35 @@ func WrapQueryError(err error, operation, table, query string, args []any) error
 	return NewQueryError(err, operation, table, query, args)
 }
 
+// RepositoryError represents repository operation errors.
+type RepositoryError struct {
+	EntityName string
+	Operation  string
+	Context    map[string]any
+	Err        error
+}
+
+func (e *RepositoryError) Error() string {
+	return fmt.Sprintf("repository error in %s.%s: %v", e.EntityName, e.Operation, e.Err)
+}
+
+func (e *RepositoryError) Unwrap() error {
+	return e.Err
+}
+
+// WrapRepositoryError wraps an error with repository context.
+func WrapRepositoryError(err error, entityName, operation string, context map[string]any) error {
+	if err == nil {
+		return nil
+	}
+	return &RepositoryError{
+		EntityName: entityName,
+		Operation:  operation,
+		Context:    context,
+		Err:        err,
+	}
+}
+
 // Error checking functions
 
 // IsConnectionError checks if an error is a connection error.
@@ -318,4 +350,20 @@ func IsValidationError(err error) bool {
 func IsConfigError(err error) bool {
 	var configErr *ConfigError
 	return errors.As(err, &configErr)
+}
+
+// NewValidationErrorFromResult creates a validation error from a validation result.
+func NewValidationErrorFromResult(result *validation.Result, entity interface{}) *ValidationError {
+	if result.IsValid {
+		return nil
+	}
+
+	messages := make([]string, 0, len(result.Errors))
+	for _, err := range result.Errors {
+		messages = append(messages, err.Error())
+	}
+
+	return &ValidationError{
+		Message: "validation failed: " + strings.Join(messages, "; "),
+	}
 }

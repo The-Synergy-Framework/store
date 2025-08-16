@@ -12,20 +12,38 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	filestore "store/files"
 	"strconv"
 	"strings"
 	"time"
 
-	"store/files"
+	"core/validation"
 )
 
 // FilesystemConfig configures the filesystem filestore.
 type FilesystemConfig struct {
-	Root        string
-	BaseURL     string
-	SecretKey   string
-	MaxFileSize int64 // 0 = unlimited
-	ChunkSize   int   // bytes per write; default 2MB if 0
+	Root        string `validate:"required"`
+	BaseURL     string `validate:"omitempty"`
+	SecretKey   string `validate:"omitempty"`
+	MaxFileSize int64  `validate:"min:0"` // 0 = unlimited
+	ChunkSize   int    `validate:"min:0"` // bytes per write; default 2MB if 0
+}
+
+// Validate validates the filesystem configuration.
+func (c FilesystemConfig) Validate() error {
+	res := validation.Validate(c)
+	if res != nil && !res.IsValid {
+		msgs := make([]string, 0, len(res.Errors))
+		for _, e := range res.Errors {
+			msgs = append(msgs, e.Error())
+		}
+		return fmt.Errorf("invalid filesystem config: %s", strings.Join(msgs, "; "))
+	}
+	// If BaseURL is set (used for public URLs and presigned URLs), SecretKey should be provided
+	if strings.TrimSpace(c.BaseURL) != "" && strings.TrimSpace(c.SecretKey) == "" {
+		return fmt.Errorf("SecretKey is required when BaseURL is set")
+	}
+	return nil
 }
 
 // filesystemAdapter implements filestore.FileStore directly.
@@ -39,7 +57,10 @@ type filesystemAdapter struct {
 }
 
 // NewFilesystem creates a filesystem filestore from config.
-func NewFilesystem(cfg FilesystemConfig) (files.FileStore, error) {
+func NewFilesystem(cfg FilesystemConfig) (filestore.FileStore, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	ad := &filesystemAdapter{
 		root:      cfg.Root,
 		baseURL:   cfg.BaseURL,
@@ -57,11 +78,11 @@ func NewFilesystem(cfg FilesystemConfig) (files.FileStore, error) {
 }
 
 // FileStore interface implementation
-func (a *filesystemAdapter) Store(ctx context.Context, f files.File) (files.FileID, *files.FileMetadata, error) {
+func (a *filesystemAdapter) Store(ctx context.Context, f filestore.File) (filestore.FileID, *filestore.FileMetadata, error) {
 	md := f.Metadata()
 	stream, err := f.Stream()
 	if err != nil {
-		return files.InvalidFileID, nil, err
+		return filestore.InvalidFileID, nil, err
 	}
 	defer stream.Close()
 
@@ -71,11 +92,11 @@ func (a *filesystemAdapter) Store(ctx context.Context, f files.File) (files.File
 	// Compute a temporary path under root to avoid loading everything in memory
 	tmpDir := a.root
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
-		return files.InvalidFileID, nil, err
+		return filestore.InvalidFileID, nil, err
 	}
 	tmpFile, err := os.CreateTemp(tmpDir, "upload-*")
 	if err != nil {
-		return files.InvalidFileID, nil, err
+		return filestore.InvalidFileID, nil, err
 	}
 	defer func() { _ = tmpFile.Close(); _ = os.Remove(tmpFile.Name()) }()
 
@@ -85,17 +106,17 @@ func (a *filesystemAdapter) Store(ctx context.Context, f files.File) (files.File
 	buf := make([]byte, bufSize)
 	for {
 		if a.maxSize > 0 && written >= a.maxSize {
-			return files.InvalidFileID, nil, fmt.Errorf("file exceeds max size: %d", a.maxSize)
+			return filestore.InvalidFileID, nil, fmt.Errorf("file exceeds max size: %d", a.maxSize)
 		}
 		n, rerr := stream.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
 			_, herr := h.Write(chunk)
 			if herr != nil {
-				return files.InvalidFileID, nil, herr
+				return filestore.InvalidFileID, nil, herr
 			}
 			if _, werr := tmpFile.Write(chunk); werr != nil {
-				return files.InvalidFileID, nil, werr
+				return filestore.InvalidFileID, nil, werr
 			}
 			written += int64(n)
 		}
@@ -103,7 +124,7 @@ func (a *filesystemAdapter) Store(ctx context.Context, f files.File) (files.File
 			break
 		}
 		if rerr != nil {
-			return files.InvalidFileID, nil, rerr
+			return filestore.InvalidFileID, nil, rerr
 		}
 	}
 	// Derive content hash and final ID (contentHash + original name)
@@ -111,17 +132,17 @@ func (a *filesystemAdapter) Store(ctx context.Context, f files.File) (files.File
 	h2 := sha256.New()
 	h2.Write([]byte(fmt.Sprintf("%s:%s", contentHash, md.Name)))
 	finalHash := hex.EncodeToString(h2.Sum(nil))
-	id := files.FileID(finalHash[:files.FileIDLength])
+	id := filestore.FileID(finalHash[:filestore.FileIDLength])
 
 	// Compute final path with sharding and ensure directory exists
 	finalPath := a.pathFor(id)
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0755); err != nil {
-		return files.InvalidFileID, nil, err
+		return filestore.InvalidFileID, nil, err
 	}
 	// If file already exists (dedup), discard temp and return metadata
 	exists, err := a.Exists(ctx, id)
 	if err != nil {
-		return files.InvalidFileID, nil, err
+		return filestore.InvalidFileID, nil, err
 	}
 	if exists {
 		meta, err := a.GetMetadata(ctx, id)
@@ -130,16 +151,16 @@ func (a *filesystemAdapter) Store(ctx context.Context, f files.File) (files.File
 	// Sync temp to disk before rename (best-effort)
 	_ = tmpFile.Sync()
 	if err := tmpFile.Close(); err != nil {
-		return files.InvalidFileID, nil, err
+		return filestore.InvalidFileID, nil, err
 	}
 	if err := os.Rename(tmpFile.Name(), finalPath); err != nil {
-		return files.InvalidFileID, nil, err
+		return filestore.InvalidFileID, nil, err
 	}
 	meta, err := a.GetMetadata(ctx, id)
 	return id, meta, err
 }
 
-func (a *filesystemAdapter) Retrieve(ctx context.Context, id files.FileID) (files.File, error) {
+func (a *filesystemAdapter) Retrieve(ctx context.Context, id filestore.FileID) (filestore.File, error) {
 	p := a.pathFor(id)
 	stream, err := os.Open(p)
 	if err != nil {
@@ -150,20 +171,20 @@ func (a *filesystemAdapter) Retrieve(ctx context.Context, id files.FileID) (file
 		stream.Close()
 		return nil, err
 	}
-	name := files.ExtractOriginalFileName(id)
+	name := filestore.ExtractOriginalFileName(id)
 	if name == "" {
 		name = string(id)
 	}
 	ext := filepath.Ext(name)
-	md := files.FileMetadata{Name: name, Path: string(id), Size: info.Size(), ContentType: mime.TypeByExtension(ext)}
+	md := filestore.FileMetadata{Name: name, Path: string(id), Size: info.Size(), ContentType: mime.TypeByExtension(ext)}
 	return &fileAdapter{metadata: md, stream: stream}, nil
 }
 
-func (a *filesystemAdapter) Delete(ctx context.Context, id files.FileID) error {
+func (a *filesystemAdapter) Delete(ctx context.Context, id filestore.FileID) error {
 	return os.Remove(a.pathFor(id))
 }
 
-func (a *filesystemAdapter) Exists(ctx context.Context, id files.FileID) (bool, error) {
+func (a *filesystemAdapter) Exists(ctx context.Context, id filestore.FileID) (bool, error) {
 	_, err := os.Stat(a.pathFor(id))
 	if err == nil {
 		return true, nil
@@ -174,18 +195,18 @@ func (a *filesystemAdapter) Exists(ctx context.Context, id files.FileID) (bool, 
 	return false, err
 }
 
-func (a *filesystemAdapter) GetMetadata(ctx context.Context, id files.FileID) (*files.FileMetadata, error) {
+func (a *filesystemAdapter) GetMetadata(ctx context.Context, id filestore.FileID) (*filestore.FileMetadata, error) {
 	p := a.pathFor(id)
 	info, err := os.Stat(p)
 	if err != nil {
 		return nil, err
 	}
-	name := files.ExtractOriginalFileName(id)
+	name := filestore.ExtractOriginalFileName(id)
 	if name == "" {
 		name = string(id)
 	}
 	ext := filepath.Ext(name)
-	md := files.FileMetadata{
+	md := filestore.FileMetadata{
 		Name:        name,
 		Path:        string(id),
 		Size:        info.Size(),
@@ -194,7 +215,7 @@ func (a *filesystemAdapter) GetMetadata(ctx context.Context, id files.FileID) (*
 	return &md, nil
 }
 
-func (a *filesystemAdapter) List(ctx context.Context, pageSize int32, pageToken string) ([]files.FileMetadata, string, error) {
+func (a *filesystemAdapter) List(ctx context.Context, pageSize int32, pageToken string) ([]filestore.FileMetadata, string, error) {
 	// Traverse sharded directories and collect names; for very large trees, prefer an index.
 	var names []string
 	err := filepath.WalkDir(a.root, func(path string, d os.DirEntry, err error) error {
@@ -237,9 +258,9 @@ func (a *filesystemAdapter) List(ctx context.Context, pageSize int32, pageToken 
 		nextToken = names[end-1]
 	}
 
-	items := make([]files.FileMetadata, 0, end-start)
+	items := make([]filestore.FileMetadata, 0, end-start)
 	for _, n := range names[start:end] {
-		id := files.FileID(n)
+		id := filestore.FileID(n)
 		md, err := a.GetMetadata(ctx, id)
 		if err != nil {
 			return nil, "", err
@@ -249,7 +270,7 @@ func (a *filesystemAdapter) List(ctx context.Context, pageSize int32, pageToken 
 	return items, nextToken, nil
 }
 
-func (a *filesystemAdapter) GeneratePresignedURL(ctx context.Context, id files.FileID, expires time.Duration) (string, error) {
+func (a *filesystemAdapter) GeneratePresignedURL(ctx context.Context, id filestore.FileID, expires time.Duration) (string, error) {
 	if a.baseURL == "" {
 		return "", fmt.Errorf("base URL not configured for presigned URLs")
 	}
@@ -264,7 +285,7 @@ func (a *filesystemAdapter) GeneratePresignedURL(ctx context.Context, id files.F
 	return fmt.Sprintf("%s/files/%s?token=%s", strings.TrimSuffix(a.baseURL, "/"), id, token), nil
 }
 
-func (a *filesystemAdapter) GetURL(ctx context.Context, id files.FileID) (string, error) {
+func (a *filesystemAdapter) GetURL(ctx context.Context, id filestore.FileID) (string, error) {
 	if a.baseURL == "" {
 		return "file://" + a.pathFor(id), nil
 	}
@@ -272,7 +293,7 @@ func (a *filesystemAdapter) GetURL(ctx context.Context, id files.FileID) (string
 }
 
 // Helper methods
-func (a *filesystemAdapter) shardPath(id files.FileID) string {
+func (a *filesystemAdapter) shardPath(id filestore.FileID) string {
 	name := string(id)
 	if len(name) < 4 {
 		return a.root
@@ -280,11 +301,11 @@ func (a *filesystemAdapter) shardPath(id files.FileID) string {
 	return filepath.Join(a.root, name[0:2], name[2:4])
 }
 
-func (a *filesystemAdapter) pathFor(id files.FileID) string {
+func (a *filesystemAdapter) pathFor(id filestore.FileID) string {
 	return filepath.Join(a.shardPath(id), string(id))
 }
 
-func (a *filesystemAdapter) generateToken(fileID files.FileID, expires time.Duration) string {
+func (a *filesystemAdapter) generateToken(fileID filestore.FileID, expires time.Duration) string {
 	expiresAt := time.Now().Add(expires)
 	ts := strconv.FormatInt(expiresAt.Unix(), 10)
 	sig := a.generateSignature(string(fileID), ts)
@@ -300,12 +321,12 @@ func (a *filesystemAdapter) generateSignature(path, timestamp string) string {
 
 // fileAdapter implements filestore.File
 type fileAdapter struct {
-	metadata files.FileMetadata
+	metadata filestore.FileMetadata
 	stream   io.ReadCloser
 }
 
-func (f *fileAdapter) Metadata() files.FileMetadata   { return f.metadata }
-func (f *fileAdapter) Stream() (io.ReadCloser, error) { return f.stream, nil }
+func (f *fileAdapter) Metadata() filestore.FileMetadata { return f.metadata }
+func (f *fileAdapter) Stream() (io.ReadCloser, error)   { return f.stream, nil }
 
 // Open creates a filesystem filestore from config (convenience alias for NewFilesystem).
-func Open(cfg FilesystemConfig) (files.FileStore, error) { return NewFilesystem(cfg) }
+func Open(cfg FilesystemConfig) (filestore.FileStore, error) { return NewFilesystem(cfg) }

@@ -3,6 +3,14 @@ package store
 // Mutation is a marker interface for write operations.
 type Mutation interface{ isMutation() }
 
+// CompiledMutation represents a backend-specific compiled mutation.
+type CompiledMutation struct {
+	SQL  string
+	Args []any
+	// Hints for mutation-specific options (e.g., RETURNING clauses)
+	Hints map[string]any
+}
+
 // Insert represents an insert operation with column values.
 type Insert struct {
 	Values map[string]any
@@ -19,10 +27,10 @@ func (m Insert) WithReturning(cols ...string) Insert {
 	return m
 }
 
-// Update represents an update with SET values and a WHERE filter.
+// Update represents an update with SET values and WHERE conditions.
 type Update struct {
 	Set   map[string]any
-	Where Node
+	Where []Condition    // Simple list of conditions (all ANDed together)
 	Hints map[string]any // e.g., {"returning": []string{"updated_at"}}
 }
 
@@ -36,10 +44,10 @@ func (m Update) WithReturning(cols ...string) Update {
 	return m
 }
 
-// Delete represents a delete with a WHERE filter.
+// Delete represents a delete with WHERE conditions.
 type Delete struct {
-	Where Node
-	Hints map[string]any // e.g., {"returning": []string{"id"}}
+	Where []Condition // Simple list of conditions (all ANDed together)
+	Hints map[string]any
 }
 
 func (Delete) isMutation() {}
@@ -52,33 +60,22 @@ func (m Delete) WithReturning(cols ...string) Delete {
 	return m
 }
 
-// Upsert represents an insert with conflict resolution (dialect-dependent).
-// For SQL (PostgreSQL), it compiles to ON CONFLICT (ConflictColumns) DO UPDATE SET UpdateSet.
-type Upsert struct {
-	Values          map[string]any
-	ConflictColumns []string
-	UpdateSet       map[string]any // columns to update on conflict
-	Hints           map[string]any // e.g., {"returning": []string{"id"}}
+// MutationResult represents the result of a mutation operation.
+type MutationResult struct {
+	RowsAffected int64
+	LastInsertID string
+	Returning    []map[string]any
 }
 
-func (Upsert) isMutation() {}
-
-func (m Upsert) WithReturning(cols ...string) Upsert {
-	if m.Hints == nil {
-		m.Hints = map[string]any{}
-	}
-	m.Hints["returning"] = cols
-	return m
+// Helper constructors for mutations
+func NewInsert(values map[string]any) Insert {
+	return Insert{Values: values}
 }
 
-// Helper constructors
+func NewUpdate(set map[string]any, conditions ...Condition) Update {
+	return Update{Set: set, Where: conditions}
+}
 
-func NewInsert(values map[string]any) Insert { return Insert{Values: values} }
-
-func NewUpdate(set map[string]any, where Node) Update { return Update{Set: set, Where: where} }
-
-func NewDelete(where Node) Delete { return Delete{Where: where} }
-
-func NewUpsert(values map[string]any, conflictCols []string, updateSet map[string]any) Upsert {
-	return Upsert{Values: values, ConflictColumns: conflictCols, UpdateSet: updateSet}
+func NewDelete(conditions ...Condition) Delete {
+	return Delete{Where: conditions}
 }

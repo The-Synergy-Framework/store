@@ -32,31 +32,6 @@ type Service interface {
 	WithTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc)
 }
 
-// Repository defines the common repository interface for services.
-// This is intentionally minimal - specific backends extend this.
-type Repository interface {
-	// EntityName returns the name of the entity this repository manages
-	EntityName() string
-}
-
-// EntityRepository defines a storage-agnostic contract for basic entity access.
-// Different backends (SQL, Document, KV) can implement this interface.
-type EntityRepository[T any] interface {
-	GetByID(ctx context.Context, id string) (T, error)
-	Exists(ctx context.Context, id string) (bool, error)
-	DeleteByID(ctx context.Context, id string) error
-}
-
-// Queryable adds list/pagination capabilities.
-type Queryable[T any] interface {
-	List(ctx context.Context, pageSize int32, cursor string, columns ...string) ([]T, string, error)
-}
-
-// Countable exposes count operations.
-type Countable interface {
-	Count(ctx context.Context) (int64, error)
-}
-
 // Transactor provides a backend-agnostic transaction execution contract.
 // Implementations may be no-ops if the backend does not support transactions.
 type Transactor interface {
@@ -66,6 +41,76 @@ type Transactor interface {
 
 	// WithReadTx executes fn within a read-only transaction when supported.
 	WithReadTx(ctx context.Context, fn func(context.Context) error) error
+
+	// WithTxOptions executes fn within a transaction with specific options.
+	WithTxOptions(ctx context.Context, opts TxOptions, fn func(context.Context) error) error
+
+	// HasTx returns true if the context contains an active transaction.
+	HasTx(ctx context.Context) bool
+
+	// IsTxReadOnly returns true if the current transaction is read-only.
+	IsTxReadOnly(ctx context.Context) bool
+}
+
+// TxOptions configures transaction behavior across different backends.
+type TxOptions struct {
+	// ReadOnly specifies if the transaction should be read-only
+	ReadOnly bool
+
+	// Isolation level (implementation-specific)
+	Isolation IsolationLevel
+
+	// Timeout for the transaction
+	Timeout time.Duration
+
+	// RetryPolicy defines retry behavior on transaction conflicts
+	RetryPolicy *RetryPolicy
+
+	// Backend-specific options
+	BackendOptions map[string]any
+}
+
+// IsolationLevel represents transaction isolation levels.
+type IsolationLevel string
+
+const (
+	IsolationDefault         IsolationLevel = "default"
+	IsolationReadUncommitted IsolationLevel = "read_uncommitted"
+	IsolationReadCommitted   IsolationLevel = "read_committed"
+	IsolationRepeatableRead  IsolationLevel = "repeatable_read"
+	IsolationSerializable    IsolationLevel = "serializable"
+)
+
+// RetryPolicy defines how transactions should be retried on conflicts.
+type RetryPolicy struct {
+	MaxRetries        int
+	InitialDelay      time.Duration
+	MaxDelay          time.Duration
+	BackoffMultiplier float64
+}
+
+// DefaultRetryPolicy returns a sensible default retry policy.
+func DefaultRetryPolicy() *RetryPolicy {
+	return &RetryPolicy{
+		MaxRetries:        3,
+		InitialDelay:      10 * time.Millisecond,
+		MaxDelay:          1 * time.Second,
+		BackoffMultiplier: 2.0,
+	}
+}
+
+// TransactionManager provides advanced transaction management capabilities.
+type TransactionManager interface {
+	Transactor
+
+	// Savepoint creates a savepoint within the current transaction (if supported).
+	Savepoint(ctx context.Context, name string) error
+
+	// RollbackToSavepoint rolls back to a specific savepoint.
+	RollbackToSavepoint(ctx context.Context, name string) error
+
+	// ReleaseSavepoint releases a savepoint.
+	ReleaseSavepoint(ctx context.Context, name string) error
 }
 
 // Connection represents a generic connection interface.
@@ -78,7 +123,7 @@ type Connection interface {
 // Adapter represents a generic adapter interface.
 type Adapter interface {
 	Name() string
-	Connect(ctx context.Context, config *BaseConfig) (Connection, error)
+	Connect(ctx context.Context, config *Config) (Connection, error)
 	Close() error
 }
 
@@ -181,88 +226,10 @@ func generateFileID(name string, content []byte) string {
 }
 
 // OpenFunc represents a function that opens a service with an adapter.
-type OpenFunc[T Service] func(ctx context.Context, adapter Adapter, config *BaseConfig) (T, error)
+type OpenFunc[T Service] func(ctx context.Context, adapter Adapter, config *Config) (T, error)
 
 // OpenWithNameFunc represents a function that opens a service by adapter name.
-type OpenWithNameFunc[T Service] func(ctx context.Context, adapterName string, config *BaseConfig, opts ...ConfigOption) (T, error)
-
-// RepositoryBase provides common repository functionality.
-type RepositoryBase struct {
-	entity     entity.Entity
-	entityName string
-}
-
-// NewRepositoryBase creates a new base repository.
-func NewRepositoryBase(ent entity.Entity) *RepositoryBase {
-	entityName := entity.GetEntityName(ent)
-	return &RepositoryBase{
-		entity:     ent,
-		entityName: entityName,
-	}
-}
-
-// EntityName returns the entity's name.
-func (r *RepositoryBase) EntityName() string {
-	return r.entityName
-}
-
-// Entity returns the entity template.
-func (r *RepositoryBase) Entity() entity.Entity {
-	return r.entity
-}
-
-// CreateNewEntity creates a new instance of the repository's entity type.
-func (r *RepositoryBase) CreateNewEntity() entity.Entity {
-	return entity.CreateNewEntity(r.entity)
-}
-
-// ValidateID validates that an ID is not empty.
-func (r *RepositoryBase) ValidateID(id string) error {
-	if id == "" {
-		return NewValidationError("entity ID cannot be empty")
-	}
-	return nil
-}
-
-// ValidateEntity validates that an entity has a valid ID.
-func (r *RepositoryBase) ValidateEntity(ent entity.Entity) error {
-	if ent == nil {
-		return NewValidationError("entity cannot be nil")
-	}
-
-	id := ent.GetID()
-	if id == "" {
-		return NewValidationError("entity ID cannot be empty")
-	}
-
-	return nil
-}
-
-// Common error handling helpers
-
-// HandleGetError standardizes error handling for Get operations.
-func (r *RepositoryBase) HandleGetError(err error, operation string, id string) error {
-	if err != nil {
-		return WrapQueryError(err, operation, r.EntityName(), id, []any{id})
-	}
-	return nil
-}
-
-// HandleUpdateError standardizes error handling for Update operations.
-func (r *RepositoryBase) HandleUpdateError(err error, operation string, id string) error {
-	if err != nil {
-		return WrapQueryError(err, operation, r.EntityName(), id, []any{id})
-	}
-	return nil
-}
-
-// HandleBatchError standardizes error handling for Batch operations.
-func (r *RepositoryBase) HandleBatchError(err error, operation string, items interface{}) error {
-	if err != nil {
-		return WrapQueryError(err, operation, r.EntityName(), "", []any{items})
-	}
-	return nil
-}
+type OpenWithNameFunc[T Service] func(ctx context.Context, adapterName string, config *Config) (T, error)
 
 // RunTx executes fn within a read-write transaction when supported.
 // This is a convenience helper that delegates to the Transactor interface.

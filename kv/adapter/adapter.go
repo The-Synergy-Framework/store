@@ -8,16 +8,15 @@ import (
 )
 
 // Adapter represents a key-value store adapter (Redis, Memory, etc.).
-// This follows the guard adapter pattern for pluggable backends.
 type Adapter interface {
 	// Name returns the adapter's unique identifier.
 	Name() string
 
 	// Connect establishes a connection to the key-value store.
-	Connect(ctx context.Context, config *Config) (Connection, error)
+	Connect(ctx context.Context, config *store.Config) (Connection, error)
 
 	// ConnectionString builds the connection string from config.
-	ConnectionString(config *Config) string
+	ConnectionString(config *store.Config) string
 
 	// Store capabilities
 	SupportsExpiration() bool
@@ -108,94 +107,33 @@ type TransactionCmd interface {
 	Result() ([]byte, error)
 }
 
-// Config holds KV adapter configuration.
-// It extends the shared base config with KV-specific fields.
-type Config struct {
-	store.BaseConfig
+// Config is now just an alias to store.Config - unified configuration!
+// KV-specific options (database number, read/write timeouts, TLS settings)
+// can be set via store.WithOption() or the Options map.
+type Config = store.Config
 
-	// KV-specific fields
-	Database int // Redis database number
-
-	// KV-specific pooling
-	MaxActiveConns int // KV stores may use different pooling concepts
-
-	// KV-specific timeouts
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-
-	// Security
-	TLS     bool
-	TLSCert string
-	TLSKey  string
-	TLSCA   string
-}
-
-// Option configures a KV adapter.
+// Legacy Option type - prefer store.Option in new code
 type Option func(*Config)
 
-// WithMetrics enables metrics collection.
-func WithMetrics(enabled bool, labels map[string]string) Option {
-	return func(c *Config) {
-		c.EnableMetrics = enabled
-		c.MetricLabels = labels
-	}
-}
+// WithMetrics has been moved to the root store package.
+// Use store.WithMetrics() or store.WithMetricsEnabled() instead.
 
-// WithPooling configures connection pooling.
-func WithPooling(maxIdle, maxActive int, maxLifetime, maxIdleTime time.Duration) Option {
-	return func(c *Config) {
-		c.MaxIdleConns = maxIdle
-		c.MaxActiveConns = maxActive
-		c.ConnMaxLifetime = maxLifetime
-		c.ConnMaxIdleTime = maxIdleTime
-	}
-}
-
-// WithTimeouts configures operation timeouts.
-func WithTimeouts(connect, read, write time.Duration) Option {
-	return func(c *Config) {
-		c.ConnectTimeout = connect
-		c.ReadTimeout = read
-		c.WriteTimeout = write
-	}
-}
-
-// WithConnection configures basic connection parameters.
-func WithConnection(host string, port int, username, password string) Option {
-	return func(c *Config) {
-		c.Host = host
-		c.Port = port
-		c.Username = username
-		c.Password = password
-	}
-}
-
-// WithDatabase configures database selection (for Redis).
-func WithDatabase(database int) Option {
-	return func(c *Config) {
-		c.Database = database
-	}
-}
-
-// WithTLS configures TLS settings.
-func WithTLS(enabled bool, cert, key, ca string) Option {
-	return func(c *Config) {
-		c.TLS = enabled
-		c.TLSCert = cert
-		c.TLSKey = key
-		c.TLSCA = ca
-	}
-}
+// Old KV-specific options have been moved to the root store package.
+// Use store.WithPooling(), store.WithTimeouts(), store.WithConnection() instead.
+// KV-specific timeouts (read/write) can be set via store.WithOption().
 
 // DefaultConfig returns a KV configuration with sensible defaults.
 func DefaultConfig() Config {
-	baseConfig := store.DefaultConfig()
-	return Config{
-		BaseConfig:     baseConfig,
-		Database:       0, // Redis default database
-		MaxActiveConns: 25,
-		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   30 * time.Second,
-		TLS:            false,
-	}
+	config := store.DefaultConfig()
+	// Set KV-specific defaults via Options map
+	config.Options["database"] = "0" // Redis default database
+	config.Options["max_active_conns"] = "25"
+	config.Options["read_timeout"] = "30s"
+	config.Options["write_timeout"] = "30s"
+	config.Options["tls"] = "false"
+	return config
 }
+
+// Legacy options - use store.WithOption() for KV-specific settings
+// Example: store.WithOption("database", "1") for Redis database selection
+// Example: store.WithOption("tls", "true") for TLS enablement

@@ -16,14 +16,14 @@ import (
 type Service struct {
 	adapter    adapter.Adapter
 	connection adapter.Connection
-	config     *adapter.Config
+	config     *store.Config
 }
 
 // Ensure Service implements the service interface.
 var _ store.Service = (*Service)(nil)
 
 // NewService creates a new KV service with the given adapter.
-func NewService(adpt adapter.Adapter, config *adapter.Config) *Service {
+func NewService(adpt adapter.Adapter, config *store.Config) *Service {
 	return &Service{
 		adapter: adpt,
 		config:  config,
@@ -211,8 +211,50 @@ func (s *Service) DecrBy(ctx context.Context, key string, value int64) (int64, e
 	return s.connection.DecrBy(ctx, key, value)
 }
 
+// WithTx executes fn within a transaction context (KV stores typically don't support transactions).
+func (s *Service) WithTx(ctx context.Context, fn func(context.Context) error) error {
+	// KV stores typically don't support transactions, so we just execute the function
+	return fn(ctx)
+}
+
+// WithReadTx executes fn within a read-only transaction context.
+func (s *Service) WithReadTx(ctx context.Context, fn func(context.Context) error) error {
+	// KV stores typically don't support transactions, so we just execute the function
+	return fn(ctx)
+}
+
+// WithTxOptions executes fn with transaction options (mostly no-op for KV stores).
+func (s *Service) WithTxOptions(ctx context.Context, opts store.TxOptions, fn func(context.Context) error) error {
+	// Apply timeout if specified
+	if opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+		defer cancel()
+	}
+
+	// For KV stores, we can't provide true transactions, but we can simulate basic behavior
+	return fn(ctx)
+}
+
+// HasTx returns false for KV stores since they don't support transactions.
+func (s *Service) HasTx(ctx context.Context) bool {
+	return false
+}
+
+// IsTxReadOnly returns false for KV stores.
+func (s *Service) IsTxReadOnly(ctx context.Context) bool {
+	return false
+}
+
 // Open creates and connects a new KV service using the specified adapter.
 func Open(ctx context.Context, adapter adapter.Adapter, config *adapter.Config) (*Service, error) {
+	// Validate configuration first
+	if config != nil {
+		if err := config.Validate(); err != nil {
+			return nil, err
+		}
+	}
+
 	// Create service
 	service := NewService(adapter, config)
 

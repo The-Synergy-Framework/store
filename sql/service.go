@@ -13,18 +13,17 @@ import (
 )
 
 // Service wraps a SQL adapter and provides the database service interface.
-// This follows the guard service pattern.
 type Service struct {
 	adapter adapter.Adapter
 	db      *sql.DB
-	config  *adapter.Config
+	config  *store.Config
 }
 
 // Ensure Service implements the service interface.
 var _ store.Service = (*Service)(nil)
 
 // NewService creates a new SQL service with the given adapter.
-func NewService(adpt adapter.Adapter, config *adapter.Config) *Service {
+func NewService(adpt adapter.Adapter, config *store.Config) *Service {
 	return &Service{
 		adapter: adpt,
 		config:  config,
@@ -35,7 +34,7 @@ func NewService(adpt adapter.Adapter, config *adapter.Config) *Service {
 func (s *Service) Connect(ctx context.Context) error {
 	db, err := s.adapter.Connect(ctx, s.config)
 	if err != nil {
-		return store.WrapConnectionError(err, "connect", s.adapter.Name(), s.config.Host)
+		return store.WrapConnectionError(err, "connect", string(s.adapter.Name()), s.config.Host)
 	}
 
 	if s.config.MaxOpenConns > 0 {
@@ -47,9 +46,6 @@ func (s *Service) Connect(ctx context.Context) error {
 	if s.config.ConnMaxLifetime > 0 {
 		db.SetConnMaxLifetime(s.config.ConnMaxLifetime)
 	}
-	if s.config.ConnMaxIdleTime > 0 {
-		db.SetConnMaxIdleTime(s.config.ConnMaxIdleTime)
-	}
 
 	pingCtx := ctx
 	var cancel context.CancelFunc
@@ -60,7 +56,7 @@ func (s *Service) Connect(ctx context.Context) error {
 
 	if err := db.PingContext(pingCtx); err != nil {
 		_ = db.Close()
-		return store.WrapConnectionError(err, "ping", s.adapter.Name(), s.config.Host)
+		return store.WrapConnectionError(err, "ping", string(s.adapter.Name()), s.config.Host)
 	}
 
 	s.db = db
@@ -108,10 +104,7 @@ func (s *Service) WithTimeout(ctx context.Context, timeout time.Duration) (conte
 	return context.WithTimeout(ctx, timeout)
 }
 
-// QueryExecutor returns a new query executor.
-func (s *Service) QueryExecutor() *QueryExecutor {
-	return NewQueryExecutor(s.db)
-}
+// QueryExecutor removed - using direct SQL queries for simplicity
 
 // TransactionHandler returns a new transaction handler.
 func (s *Service) TransactionHandler() *TransactionHandler {
@@ -133,7 +126,14 @@ func (s *Service) ExecuteSQL(ctx context.Context, query string, args ...interfac
 }
 
 // Open creates and connects a new SQL service using the specified adapter.
-func Open(ctx context.Context, adapter adapter.Adapter, config *adapter.Config) (*Service, error) {
+func Open(ctx context.Context, adapter adapter.Adapter, config *store.Config) (*Service, error) {
+	// Validate configuration first
+	if config != nil {
+		if err := config.Validate(); err != nil {
+			return nil, err
+		}
+	}
+
 	// Create service
 	service := NewService(adapter, config)
 
@@ -146,14 +146,14 @@ func Open(ctx context.Context, adapter adapter.Adapter, config *adapter.Config) 
 }
 
 // OpenWithName creates and connects a new SQL service using the specified adapter name.
-func OpenWithName(ctx context.Context, adapterName string, config *adapter.Config, opts ...adapter.Option) (*Service, error) {
+func OpenWithName(ctx context.Context, adapterName string, config *store.Config, opts ...store.Option) (*Service, error) {
 	// Apply options to config
 	for _, opt := range opts {
 		opt(config)
 	}
 
 	// Get adapter from registry
-	adpt, err := adapter.Get(adapterName)
+	adpt, err := adapter.Get(adapter.AdapterName(adapterName))
 	if err != nil {
 		return nil, store.WrapDriverError(err, adapterName, "get adapter")
 	}
@@ -172,15 +172,13 @@ func OpenFromEnv(ctx context.Context) (*Service, error) {
 			"env", "DB_TYPE environment variable is required")
 	}
 
-	config := &adapter.Config{
-		BaseConfig: store.BaseConfig{
-			Type:     dbType,
-			Host:     getEnvOr("DB_HOST", "localhost"),
-			Username: os.Getenv("DB_USERNAME"),
-			Password: os.Getenv("DB_PASSWORD"),
-		},
-		DBName:  os.Getenv("DB_NAME"),
-		SSLMode: getEnvOr("DB_SSL_MODE", "prefer"),
+	config := &store.Config{
+		Type:     dbType,
+		Host:     getEnvOr("DB_HOST", "localhost"),
+		Username: os.Getenv("DB_USERNAME"),
+		Password: os.Getenv("DB_PASSWORD"),
+		Database: os.Getenv("DB_NAME"),
+		SSLMode:  getEnvOr("DB_SSL_MODE", "prefer"),
 	}
 
 	// Parse port

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"core/validation"
 )
 
 // Cursor represents a pagination cursor that encodes position information.
@@ -23,8 +25,8 @@ type Cursor struct {
 
 // CursorParams holds cursor-based pagination parameters.
 type CursorParams struct {
-	PageSize int32  // Number of items per page
-	Cursor   string // Encoded cursor string (empty for first page)
+	PageSize int32  `validate:"min:value=1,max:value=1000"` // Number of items per page
+	Cursor   string `validate:"omitempty"`                  // Encoded cursor string (empty for first page)
 	Backward bool   // When true, paginate backward (older items when ordering ascending)
 }
 
@@ -86,6 +88,15 @@ func (p *Paginator) ParseParams(pageSize int32, cursor string) CursorParams {
 		PageSize: pageSize,
 		Cursor:   cursor,
 	}
+}
+
+// Validate validates cursor params using core validation.
+func (p *CursorParams) Validate() error {
+	res := validation.Validate(p)
+	if res == nil || res.IsValid {
+		return nil
+	}
+	return NewValidationError("invalid pagination parameters")
 }
 
 // DecodeCursor decodes a cursor string into a Cursor struct.
@@ -272,33 +283,4 @@ func (p *Paginator) GetPageInfo(cursor *Cursor, pageSize int32, totalCount int64
 // Config returns the current pagination configuration.
 func (p *Paginator) Config() PaginationConfig {
 	return p.config
-}
-
-// Legacy support functions for backward compatibility
-
-// LegacyOffsetParams converts cursor params to offset-based params (deprecated).
-func (p *Paginator) LegacyOffsetParams(params CursorParams) (offset int, pageSize int32) {
-	if params.Cursor == "" {
-		return 0, params.PageSize
-	}
-
-	cursor, err := p.DecodeCursor(params.Cursor)
-	if err != nil {
-		return 0, params.PageSize
-	}
-
-	// This is approximate - cursor-based doesn't have exact offsets
-	// Use timestamp-based approximation
-	offset = int(time.Since(cursor.LastTimestamp).Seconds() / 60) // Rough estimate
-	return offset, cursor.PageSize
-}
-
-// LegacyResult converts cursor result to legacy format (deprecated).
-func LegacyResult[T any](cursorResult CursorResult[T]) map[string]interface{} {
-	return map[string]interface{}{
-		"items":           cursorResult.Items,
-		"next_page_token": cursorResult.NextCursor,
-		"total_count":     cursorResult.TotalCount,
-		"has_more":        cursorResult.HasMore,
-	}
 }

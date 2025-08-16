@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"store"
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql" // MySQL driver
@@ -11,57 +12,30 @@ import (
 
 // MySQLAdapter implements the Adapter interface for MySQL.
 type MySQLAdapter struct {
-	db *sql.DB
+	*BaseSQLAdapter
 }
 
 // NewMySQLAdapter creates a new MySQL adapter.
 func NewMySQLAdapter() *MySQLAdapter {
-	return &MySQLAdapter{}
-}
-
-// Name returns the adapter name.
-func (a *MySQLAdapter) Name() string {
-	return "mysql"
+	return &MySQLAdapter{
+		BaseSQLAdapter: NewBaseSQLAdapter("mysql", "mysql"),
+	}
 }
 
 // Connect establishes a connection to MySQL.
-func (a *MySQLAdapter) Connect(ctx context.Context, config *Config) (*sql.DB, error) {
+func (a *MySQLAdapter) Connect(ctx context.Context, config *store.Config) (*sql.DB, error) {
 	connStr := a.ConnectionString(config)
-
-	db, err := sql.Open("mysql", connStr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open MySQL connection: %w", err)
-	}
-
-	// Configure connection pool
-	if config.MaxOpenConns > 0 {
-		db.SetMaxOpenConns(config.MaxOpenConns)
-	}
-	if config.MaxIdleConns > 0 {
-		db.SetMaxIdleConns(config.MaxIdleConns)
-	}
-	if config.ConnMaxLifetime > 0 {
-		db.SetConnMaxLifetime(config.ConnMaxLifetime)
-	}
-
-	// Verify connection
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to ping MySQL: %w", err)
-	}
-
-	a.db = db
-	return db, nil
+	return a.BaseSQLAdapter.Connect(ctx, config, connStr)
 }
 
 // ConnectionString constructs a MySQL connection string.
 // Format: [username[:password]@][protocol[(address)]]/dbname[?param1=value1&...&paramN=valueN]
-func (a *MySQLAdapter) ConnectionString(config *Config) string {
+func (a *MySQLAdapter) ConnectionString(config *store.Config) string {
 	var connStr strings.Builder
 
 	// User credentials
-	if config.User != "" {
-		connStr.WriteString(config.User)
+	if config.Username != "" {
+		connStr.WriteString(config.Username)
 		if config.Password != "" {
 			connStr.WriteString(":")
 			connStr.WriteString(config.Password)
@@ -85,26 +59,29 @@ func (a *MySQLAdapter) ConnectionString(config *Config) string {
 
 	// Database name
 	connStr.WriteString("/")
-	if config.DBName != "" {
-		connStr.WriteString(config.DBName)
+	if config.Database != "" {
+		connStr.WriteString(config.Database)
 	}
 
 	// Parameters
 	var params []string
 
-	// SSL mode
-	if config.SSLMode != "" {
-		params = append(params, fmt.Sprintf("tls=%s", config.SSLMode))
-	} else {
-		params = append(params, "tls=false") // Default to no SSL
+	// Always add parseTime for proper time handling
+	params = append(params, "parseTime=true")
+
+	// Add charset if not specified
+	hasCharset := false
+	for key := range config.Options {
+		if strings.ToLower(key) == "charset" {
+			hasCharset = true
+			break
+		}
+	}
+	if !hasCharset {
+		params = append(params, "charset=utf8mb4")
 	}
 
-	// Default parameters for better compatibility
-	params = append(params, "parseTime=true")
-	params = append(params, "charset=utf8mb4")
-	params = append(params, "collation=utf8mb4_unicode_ci")
-
-	// Add additional options
+	// Add custom options
 	for key, value := range config.Options {
 		params = append(params, fmt.Sprintf("%s=%s", key, value))
 	}
@@ -117,17 +94,9 @@ func (a *MySQLAdapter) ConnectionString(config *Config) string {
 	return connStr.String()
 }
 
-// SupportsMigrations indicates MySQL supports migrations.
-func (a *MySQLAdapter) SupportsMigrations() bool {
-	return true
-}
+// MySQL-specific overrides
 
-// MigrationTableName returns the migration table name.
-func (a *MySQLAdapter) MigrationTableName() string {
-	return "schema_migrations"
-}
-
-// MigrationTableSQL returns the SQL to create the migration table.
+// MigrationTableSQL returns MySQL-specific migration table SQL.
 func (a *MySQLAdapter) MigrationTableSQL() string {
 	return `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version VARCHAR(255) PRIMARY KEY,
@@ -135,12 +104,7 @@ func (a *MySQLAdapter) MigrationTableSQL() string {
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 }
 
-// SupportsTransactions indicates MySQL supports transactions.
-func (a *MySQLAdapter) SupportsTransactions() bool {
-	return true
-}
-
-// DefaultTxOptions returns default transaction options for MySQL.
+// DefaultTxOptions returns MySQL-specific transaction options.
 func (a *MySQLAdapter) DefaultTxOptions() *sql.TxOptions {
 	return &sql.TxOptions{
 		Isolation: sql.LevelRepeatableRead, // MySQL default
@@ -148,69 +112,33 @@ func (a *MySQLAdapter) DefaultTxOptions() *sql.TxOptions {
 	}
 }
 
-// SupportsUUID indicates MySQL has limited UUID support.
-func (a *MySQLAdapter) SupportsUUID() bool {
-	return false // No native UUID type, but can store as CHAR(36) or BINARY(16)
+// MySQL-specific error detection
+func (a *MySQLAdapter) IsKeyNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// MySQL: no rows in result set
+	return strings.Contains(err.Error(), "no rows in result set")
 }
 
-// SupportsJSON indicates MySQL supports JSON (since version 5.7).
-func (a *MySQLAdapter) SupportsJSON() bool {
+// MySQL-specific capability methods
+
+// SupportsReturning indicates MySQL does NOT support RETURNING clause (before MySQL 8.0.21).
+func (a *MySQLAdapter) SupportsReturning() bool {
+	return false
+}
+
+// SupportsUpsert indicates MySQL supports ON DUPLICATE KEY UPDATE.
+func (a *MySQLAdapter) SupportsUpsert() bool {
 	return true
 }
 
-// SupportsFullTextSearch indicates MySQL supports full-text search.
-func (a *MySQLAdapter) SupportsFullTextSearch() bool {
-	return true
+// QuoteIdentifier quotes a MySQL identifier.
+func (a *MySQLAdapter) QuoteIdentifier(identifier string) string {
+	return fmt.Sprintf("`%s`", strings.ReplaceAll(identifier, "`", "``"))
 }
 
-// IsUniqueConstraintViolation checks if an error is a unique constraint violation.
-func (a *MySQLAdapter) IsUniqueConstraintViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "duplicate entry") ||
-		strings.Contains(errStr, "unique constraint") ||
-		strings.Contains(errStr, "error 1062")
-}
-
-// IsForeignKeyViolation checks if an error is a foreign key violation.
-func (a *MySQLAdapter) IsForeignKeyViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "foreign key constraint") ||
-		strings.Contains(errStr, "cannot add or update a child row") ||
-		strings.Contains(errStr, "cannot delete or update a parent row") ||
-		strings.Contains(errStr, "error 1452") ||
-		strings.Contains(errStr, "error 1451")
-}
-
-// IsConnectionError checks if an error is a connection-related error.
-func (a *MySQLAdapter) IsConnectionError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "connection") ||
-		strings.Contains(errStr, "connect") ||
-		strings.Contains(errStr, "network") ||
-		strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "broken pipe") ||
-		strings.Contains(errStr, "connection reset") ||
-		strings.Contains(errStr, "server has gone away") ||
-		strings.Contains(errStr, "error 2003") ||
-		strings.Contains(errStr, "error 2006")
-}
-
-// Close releases resources held by the adapter.
-func (a *MySQLAdapter) Close() error {
-	if a.db != nil {
-		return a.db.Close()
-	}
-	return nil
+// GetDialect returns the SQL dialect for MySQL.
+func (a *MySQLAdapter) GetDialect() string {
+	return "mysql"
 }

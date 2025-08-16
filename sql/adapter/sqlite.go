@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"store"
 	"strings"
 
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
@@ -12,73 +13,64 @@ import (
 
 // SQLiteAdapter implements the Adapter interface for SQLite.
 type SQLiteAdapter struct {
-	db *sql.DB
+	*BaseSQLAdapter
 }
 
 // NewSQLiteAdapter creates a new SQLite adapter.
 func NewSQLiteAdapter() *SQLiteAdapter {
-	return &SQLiteAdapter{}
-}
-
-// Name returns the adapter name.
-func (a *SQLiteAdapter) Name() string {
-	return "sqlite"
+	return &SQLiteAdapter{
+		BaseSQLAdapter: NewBaseSQLAdapter("sqlite3", "sqlite"),
+	}
 }
 
 // Connect establishes a connection to SQLite.
-func (a *SQLiteAdapter) Connect(ctx context.Context, config *Config) (*sql.DB, error) {
+func (a *SQLiteAdapter) Connect(ctx context.Context, config *store.Config) (*sql.DB, error) {
 	connStr := a.ConnectionString(config)
 
-	db, err := sql.Open("sqlite3", connStr)
+	// SQLite-specific connection handling
+	db, err := a.BaseSQLAdapter.Connect(ctx, config, connStr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open SQLite connection: %w", err)
+		return nil, err
 	}
 
-	// Configure connection pool (SQLite specific)
-	// SQLite works best with a single connection for writes
-	if config.MaxOpenConns > 0 {
-		db.SetMaxOpenConns(config.MaxOpenConns)
-	} else {
-		db.SetMaxOpenConns(1) // Default for SQLite
-	}
+	// SQLite-specific optimizations
+	a.configureSQLiteOptimizations(db)
 
-	if config.MaxIdleConns > 0 {
-		db.SetMaxIdleConns(config.MaxIdleConns)
-	}
-	if config.ConnMaxLifetime > 0 {
-		db.SetConnMaxLifetime(config.ConnMaxLifetime)
-	}
-
-	// Verify connection
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to ping SQLite: %w", err)
-	}
-
-	// Enable foreign keys (disabled by default in SQLite)
-	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
-	}
-
-	a.db = db
 	return db, nil
 }
 
+// configureSQLiteOptimizations applies SQLite-specific performance settings.
+func (a *SQLiteAdapter) configureSQLiteOptimizations(db *sql.DB) {
+	// Enable WAL mode for better concurrency
+	db.Exec("PRAGMA journal_mode=WAL")
+
+	// Set synchronous to NORMAL for better performance
+	db.Exec("PRAGMA synchronous=NORMAL")
+
+	// Enable foreign keys
+	db.Exec("PRAGMA foreign_keys=ON")
+
+	// Set cache size (negative value = KB)
+	db.Exec("PRAGMA cache_size=-64000") // 64MB cache
+}
+
 // ConnectionString constructs a SQLite connection string.
-func (a *SQLiteAdapter) ConnectionString(config *Config) string {
-	// For SQLite, DBName is the file path
-	dbPath := config.DBName
+func (a *SQLiteAdapter) ConnectionString(config *store.Config) string {
+	// For SQLite, use FilePath or Database field as the file path
+	dbPath := config.FilePath
+	if dbPath == "" {
+		dbPath = config.Database
+	}
 	if dbPath == "" {
 		dbPath = ":memory:" // In-memory database
-	} else {
-		// Ensure the path is absolute or relative to current working directory
-		if !filepath.IsAbs(dbPath) && !strings.HasPrefix(dbPath, ":") {
-			dbPath = filepath.Clean(dbPath)
-		}
 	}
 
-	// Add SQLite-specific options
+	// Expand relative paths
+	if dbPath != ":memory:" && !filepath.IsAbs(dbPath) {
+		dbPath = filepath.Join(".", dbPath)
+	}
+
+	// Add query parameters if provided
 	var params []string
 	for key, value := range config.Options {
 		params = append(params, fmt.Sprintf("%s=%s", key, value))
@@ -91,17 +83,9 @@ func (a *SQLiteAdapter) ConnectionString(config *Config) string {
 	return dbPath
 }
 
-// SupportsMigrations indicates SQLite supports migrations.
-func (a *SQLiteAdapter) SupportsMigrations() bool {
-	return true
-}
+// SQLite-specific overrides
 
-// MigrationTableName returns the migration table name.
-func (a *SQLiteAdapter) MigrationTableName() string {
-	return "schema_migrations"
-}
-
-// MigrationTableSQL returns the SQL to create the migration table.
+// MigrationTableSQL returns SQLite-specific migration table SQL.
 func (a *SQLiteAdapter) MigrationTableSQL() string {
 	return `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version TEXT PRIMARY KEY,
@@ -109,73 +93,53 @@ func (a *SQLiteAdapter) MigrationTableSQL() string {
 	)`
 }
 
-// SupportsTransactions indicates SQLite supports transactions.
-func (a *SQLiteAdapter) SupportsTransactions() bool {
-	return true
-}
-
-// DefaultTxOptions returns default transaction options for SQLite.
+// DefaultTxOptions returns SQLite-specific transaction options.
 func (a *SQLiteAdapter) DefaultTxOptions() *sql.TxOptions {
 	return &sql.TxOptions{
-		Isolation: sql.LevelSerializable, // SQLite default
+		Isolation: sql.LevelSerializable, // SQLite uses serializable by default
 		ReadOnly:  false,
 	}
 }
 
-// SupportsUUID indicates SQLite does not have native UUID support.
-func (a *SQLiteAdapter) SupportsUUID() bool {
-	return false // No native UUID type, but can store as TEXT
-}
-
-// SupportsJSON indicates SQLite supports JSON (since version 3.38).
-func (a *SQLiteAdapter) SupportsJSON() bool {
-	return true // JSON1 extension is commonly available
-}
-
-// SupportsFullTextSearch indicates SQLite supports FTS.
-func (a *SQLiteAdapter) SupportsFullTextSearch() bool {
-	return true // FTS5 extension
-}
-
-// IsUniqueConstraintViolation checks if an error is a unique constraint violation.
-func (a *SQLiteAdapter) IsUniqueConstraintViolation(err error) bool {
+// SQLite-specific error detection
+func (a *SQLiteAdapter) IsKeyNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "unique constraint") ||
-		strings.Contains(errStr, "unique constraint failed")
+	// SQLite: no rows in result set
+	return strings.Contains(err.Error(), "no rows in result set")
 }
 
-// IsForeignKeyViolation checks if an error is a foreign key violation.
-func (a *SQLiteAdapter) IsForeignKeyViolation(err error) bool {
-	if err == nil {
-		return false
-	}
+// SQLite-specific capability methods
 
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "foreign key constraint") ||
-		strings.Contains(errStr, "foreign key constraint failed")
+// SupportsReturning indicates SQLite supports RETURNING clause (since version 3.35.0).
+func (a *SQLiteAdapter) SupportsReturning() bool {
+	return true
 }
 
-// IsConnectionError checks if an error is a connection-related error.
-func (a *SQLiteAdapter) IsConnectionError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "database is locked") ||
-		strings.Contains(errStr, "database schema has changed") ||
-		strings.Contains(errStr, "no such file") ||
-		strings.Contains(errStr, "unable to open database")
+// SupportsUpsert indicates SQLite supports INSERT OR REPLACE / ON CONFLICT.
+func (a *SQLiteAdapter) SupportsUpsert() bool {
+	return true
 }
 
-// Close releases resources held by the adapter.
-func (a *SQLiteAdapter) Close() error {
-	if a.db != nil {
-		return a.db.Close()
-	}
-	return nil
+// QuoteIdentifier quotes a SQLite identifier.
+func (a *SQLiteAdapter) QuoteIdentifier(identifier string) string {
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(identifier, `"`, `""`))
+}
+
+// GetDialect returns the SQL dialect for SQLite.
+func (a *SQLiteAdapter) GetDialect() string {
+	return "sqlite"
+}
+
+// SQLite-specific methods
+
+// SupportsWAL indicates SQLite supports Write-Ahead Logging.
+func (a *SQLiteAdapter) SupportsWAL() bool {
+	return true
+}
+
+// IsEmbedded indicates SQLite is an embedded database.
+func (a *SQLiteAdapter) IsEmbedded() bool {
+	return true
 }

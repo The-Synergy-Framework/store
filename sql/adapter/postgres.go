@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"store"
 	"strings"
 
 	_ "github.com/lib/pq" // PostgreSQL driver
@@ -11,51 +12,24 @@ import (
 
 // PostgreSQLAdapter implements the Adapter interface for PostgreSQL.
 type PostgreSQLAdapter struct {
-	db *sql.DB
+	*BaseSQLAdapter
 }
 
 // NewPostgreSQLAdapter creates a new PostgreSQL adapter.
 func NewPostgreSQLAdapter() *PostgreSQLAdapter {
-	return &PostgreSQLAdapter{}
-}
-
-// Name returns the adapter name.
-func (a *PostgreSQLAdapter) Name() string {
-	return "postgresql"
+	return &PostgreSQLAdapter{
+		BaseSQLAdapter: NewBaseSQLAdapter("postgres", "postgresql"),
+	}
 }
 
 // Connect establishes a connection to PostgreSQL.
-func (a *PostgreSQLAdapter) Connect(ctx context.Context, config *Config) (*sql.DB, error) {
+func (a *PostgreSQLAdapter) Connect(ctx context.Context, config *store.Config) (*sql.DB, error) {
 	connStr := a.ConnectionString(config)
-
-	db, err := sql.Open("postgres", connStr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open PostgreSQL connection: %w", err)
-	}
-
-	// Configure connection pool
-	if config.MaxOpenConns > 0 {
-		db.SetMaxOpenConns(config.MaxOpenConns)
-	}
-	if config.MaxIdleConns > 0 {
-		db.SetMaxIdleConns(config.MaxIdleConns)
-	}
-	if config.ConnMaxLifetime > 0 {
-		db.SetConnMaxLifetime(config.ConnMaxLifetime)
-	}
-
-	// Verify connection
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to ping PostgreSQL: %w", err)
-	}
-
-	a.db = db
-	return db, nil
+	return a.BaseSQLAdapter.Connect(ctx, config, connStr)
 }
 
 // ConnectionString constructs a PostgreSQL connection string.
-func (a *PostgreSQLAdapter) ConnectionString(config *Config) string {
+func (a *PostgreSQLAdapter) ConnectionString(config *store.Config) string {
 	var parts []string
 
 	if config.Host != "" {
@@ -64,11 +38,11 @@ func (a *PostgreSQLAdapter) ConnectionString(config *Config) string {
 	if config.Port > 0 {
 		parts = append(parts, fmt.Sprintf("port=%d", config.Port))
 	}
-	if config.DBName != "" {
-		parts = append(parts, fmt.Sprintf("dbname=%s", config.DBName))
+	if config.Database != "" {
+		parts = append(parts, fmt.Sprintf("dbname=%s", config.Database))
 	}
-	if config.User != "" {
-		parts = append(parts, fmt.Sprintf("user=%s", config.User))
+	if config.Username != "" {
+		parts = append(parts, fmt.Sprintf("user=%s", config.Username))
 	}
 	if config.Password != "" {
 		parts = append(parts, fmt.Sprintf("password=%s", config.Password))
@@ -89,17 +63,9 @@ func (a *PostgreSQLAdapter) ConnectionString(config *Config) string {
 	return strings.Join(parts, " ")
 }
 
-// SupportsMigrations indicates PostgreSQL supports migrations.
-func (a *PostgreSQLAdapter) SupportsMigrations() bool {
-	return true
-}
+// PostgreSQL-specific overrides
 
-// MigrationTableName returns the migration table name.
-func (a *PostgreSQLAdapter) MigrationTableName() string {
-	return "schema_migrations"
-}
-
-// MigrationTableSQL returns the SQL to create the migration table.
+// MigrationTableSQL returns PostgreSQL-specific migration table SQL.
 func (a *PostgreSQLAdapter) MigrationTableSQL() string {
 	return `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version VARCHAR(255) PRIMARY KEY,
@@ -107,12 +73,7 @@ func (a *PostgreSQLAdapter) MigrationTableSQL() string {
 	)`
 }
 
-// SupportsTransactions indicates PostgreSQL supports transactions.
-func (a *PostgreSQLAdapter) SupportsTransactions() bool {
-	return true
-}
-
-// DefaultTxOptions returns default transaction options for PostgreSQL.
+// DefaultTxOptions returns PostgreSQL-specific transaction options.
 func (a *PostgreSQLAdapter) DefaultTxOptions() *sql.TxOptions {
 	return &sql.TxOptions{
 		Isolation: sql.LevelReadCommitted,
@@ -120,62 +81,34 @@ func (a *PostgreSQLAdapter) DefaultTxOptions() *sql.TxOptions {
 	}
 }
 
-// SupportsUUID indicates PostgreSQL supports UUIDs.
-func (a *PostgreSQLAdapter) SupportsUUID() bool {
-	return true
-}
-
-// SupportsJSON indicates PostgreSQL supports JSON.
-func (a *PostgreSQLAdapter) SupportsJSON() bool {
-	return true
-}
-
-// SupportsFullTextSearch indicates PostgreSQL supports full-text search.
-func (a *PostgreSQLAdapter) SupportsFullTextSearch() bool {
-	return true
-}
-
-// IsUniqueConstraintViolation checks if an error is a unique constraint violation.
-func (a *PostgreSQLAdapter) IsUniqueConstraintViolation(err error) bool {
+// PostgreSQL-specific error detection
+func (a *PostgreSQLAdapter) IsKeyNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "unique constraint") ||
-		strings.Contains(errStr, "duplicate key")
+	// PostgreSQL: no rows in result set
+	return strings.Contains(err.Error(), "no rows in result set")
 }
 
-// IsForeignKeyViolation checks if an error is a foreign key violation.
-func (a *PostgreSQLAdapter) IsForeignKeyViolation(err error) bool {
-	if err == nil {
-		return false
-	}
+// PostgreSQL-specific capability methods (if different from base)
+// Note: Most capabilities are inherited from BaseSQLAdapter
 
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "foreign key") ||
-		strings.Contains(errStr, "violates foreign key constraint")
+// SupportsReturning indicates PostgreSQL supports RETURNING clause.
+func (a *PostgreSQLAdapter) SupportsReturning() bool {
+	return true
 }
 
-// IsConnectionError checks if an error is a connection-related error.
-func (a *PostgreSQLAdapter) IsConnectionError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "connection") ||
-		strings.Contains(errStr, "connect") ||
-		strings.Contains(errStr, "network") ||
-		strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "broken pipe") ||
-		strings.Contains(errStr, "connection reset")
+// SupportsUpsert indicates PostgreSQL supports ON CONFLICT (UPSERT).
+func (a *PostgreSQLAdapter) SupportsUpsert() bool {
+	return true
 }
 
-// Close releases resources held by the adapter.
-func (a *PostgreSQLAdapter) Close() error {
-	if a.db != nil {
-		return a.db.Close()
-	}
-	return nil
+// QuoteIdentifier quotes a PostgreSQL identifier.
+func (a *PostgreSQLAdapter) QuoteIdentifier(identifier string) string {
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(identifier, `"`, `""`))
+}
+
+// GetDialect returns the SQL dialect for PostgreSQL.
+func (a *PostgreSQLAdapter) GetDialect() string {
+	return "postgresql"
 }
