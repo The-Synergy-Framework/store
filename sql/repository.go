@@ -55,7 +55,7 @@ func (r *Repository) Exists(ctx context.Context, id string) (bool, error) {
 		return false, err
 	}
 
-	qb := r.NewQueryBuilder().WhereEq("id", id)
+	qb := r.Find().WhereEq("id", id)
 	exists, err := r.queryExecutor.Exists(ctx, qb)
 	if err != nil {
 		return false, r.HandleGetError(err, "exists", id)
@@ -69,7 +69,7 @@ func (r *Repository) DeleteByID(ctx context.Context, id string) error {
 		return err
 	}
 
-	db := r.NewDeleteBuilder().WhereEq("id", id)
+	db := r.Delete().WhereEq("id", id)
 	res, err := r.queryExecutor.ExecuteDelete(ctx, db)
 	if err != nil {
 		return r.HandleUpdateError(err, "delete", id)
@@ -89,7 +89,7 @@ func (r *Repository) DeleteByID(ctx context.Context, id string) error {
 
 // Count returns the total count of entities.
 func (r *Repository) Count(ctx context.Context) (int64, error) {
-	qb := r.NewQueryBuilder()
+	qb := r.Find()
 	count, err := r.queryExecutor.Count(ctx, qb)
 	if err != nil {
 		return 0, r.HandleGetError(err, "count", "")
@@ -103,14 +103,14 @@ func (r *Repository) Count(ctx context.Context) (int64, error) {
 func (r *Repository) GetByIDWithColumns(ctx context.Context, id string, columns ...string) (entity.Entity, error) {
 	var result entity.Entity
 
-	err := r.transactionHandler.WithReadTransaction(ctx, func(tx *sql.Tx) error {
-		qb := r.NewQueryBuilder()
+	err := r.transactionHandler.WithReadTx(ctx, func(ctxTx context.Context) error {
+		qb := r.Find()
 		if len(columns) > 0 {
 			qb.Select(columns...)
 		}
 		qb.WhereEq("id", id)
 
-		row := r.queryExecutor.QueryRow(ctx, qb)
+		row := r.queryExecutor.QueryRow(ctxTx, qb)
 		ent, err := r.scanRow(row)
 		if err != nil {
 			if err == sql.ErrNoRows {
@@ -131,14 +131,14 @@ func (r *Repository) List(ctx context.Context, pageSize int32, pageToken string,
 	var entities []entity.Entity
 	var nextToken string
 
-	err := r.transactionHandler.WithReadTransaction(ctx, func(tx *sql.Tx) error {
+	err := r.transactionHandler.WithReadTx(ctx, func(ctxTx context.Context) error {
 		params := r.paginator.ParseParams(pageSize, pageToken)
-		qb := r.NewQueryBuilder()
+		qb := r.Find()
 		if len(columns) > 0 {
 			qb.Select(columns...)
 		}
 
-		result, err := ExecutePaginatedQuery(ctx, r.paginator, r.queryExecutor, qb, params, r.scanRowsEntity)
+		result, err := ExecutePaginatedQuery(ctxTx, r.paginator, r.queryExecutor, qb, params, r.scanRowsEntity)
 		if err != nil {
 			return err
 		}
@@ -158,7 +158,7 @@ func (r *Repository) UpdateTimestamp(ctx context.Context, id string) error {
 		return err
 	}
 
-	ub := r.NewUpdateBuilder().
+	ub := r.Update().
 		Set("updated_at", time.Now()).
 		WhereEq("id", id)
 
@@ -169,19 +169,13 @@ func (r *Repository) UpdateTimestamp(ctx context.Context, id string) error {
 // Query builders
 
 // NewQueryBuilder creates a new query builder for this entity's table.
-func (r *Repository) NewQueryBuilder() *QueryBuilder {
-	return NewQueryBuilder(r.tableName)
-}
+func (r *Repository) Find() *QueryBuilder { return NewQueryBuilder(r.tableName) }
 
 // NewUpdateBuilder creates a new update builder for this entity's table.
-func (r *Repository) NewUpdateBuilder() *UpdateBuilder {
-	return NewUpdateBuilder(r.tableName)
-}
+func (r *Repository) Update() *UpdateBuilder { return NewUpdateBuilder(r.tableName) }
 
 // NewDeleteBuilder creates a new delete builder for this entity's table.
-func (r *Repository) NewDeleteBuilder() *DeleteBuilder {
-	return NewDeleteBuilder(r.tableName)
-}
+func (r *Repository) Delete() *DeleteBuilder { return NewDeleteBuilder(r.tableName) }
 
 // ExecutePaginatedQuery executes a paginated query with custom scanning (legacy support).
 func (r *Repository) ExecutePaginatedQuery(ctx context.Context, qb *QueryBuilder, pageSize int32, pageToken string, scanFunc func(*sql.Rows) (any, error)) (*PaginationResult, error) {
@@ -193,34 +187,24 @@ func (r *Repository) ExecutePaginatedQuery(ctx context.Context, qb *QueryBuilder
 
 // scanRow scans a single row into a new entity instance.
 func (r *Repository) scanRow(row *sql.Row) (entity.Entity, error) {
-	// Create new entity instance using base functionality
 	newEntity := r.CreateNewEntity()
-
-	// Use core/entity scanner
 	if err := entity.ScanEntity(newEntity, row); err != nil {
 		return nil, err
 	}
-
 	return newEntity, nil
 }
 
 // scanRowsEntity scans sql.Rows into an entity (for new pagination).
 func (r *Repository) scanRowsEntity(rows *sql.Rows) (entity.Entity, error) {
-	// Create new entity instance using base functionality
 	newEntity := r.CreateNewEntity()
-
-	// Use core/entity scanner (adapted for sql.Rows)
 	if err := r.scanEntityFromRows(newEntity, rows); err != nil {
 		return nil, err
 	}
-
 	return newEntity, nil
 }
 
 // scanRows scans multiple rows (for legacy pagination).
-func (r *Repository) scanRows(rows *sql.Rows) (any, error) {
-	return r.scanRowsEntity(rows)
-}
+func (r *Repository) scanRows(rows *sql.Rows) (any, error) { return r.scanRowsEntity(rows) }
 
 // scanEntityFromRows adapts core/entity scanning for sql.Rows.
 func (r *Repository) scanEntityFromRows(ent entity.Entity, rows *sql.Rows) error {
@@ -231,22 +215,16 @@ func (r *Repository) scanEntityFromRows(ent entity.Entity, rows *sql.Rows) error
 
 // scanIntoStruct provides basic struct scanning using db tags.
 func (r *Repository) scanIntoStruct(target entity.Entity, scanner interface{}) error {
-	// For now, delegate to the existing scanning logic from core/entity
 	if row, ok := scanner.(*sql.Row); ok {
 		return entity.ScanEntity(target, row)
 	}
-	// Handle sql.Rows case - this would need more sophisticated implementation
 	return entity.ScanEntity(target, scanner.(*sql.Row))
 }
 
 // Accessors
 
 // Service returns the underlying SQL service.
-func (r *Repository) Service() *Service {
-	return r.service
-}
+func (r *Repository) Service() *Service { return r.service }
 
 // TableName returns the entity's table name.
-func (r *Repository) TableName() string {
-	return r.tableName
-}
+func (r *Repository) TableName() string { return r.tableName }

@@ -1,7 +1,6 @@
-package filestore
+package files
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -9,35 +8,7 @@ import (
 	"mime"
 	"os"
 	"path/filepath"
-	"time"
 )
-
-type FileID string
-
-const (
-	FileIDLength  = 16
-	InvalidFileID = FileID("")
-)
-
-type FileMetadata struct {
-	Name        string
-	Path        string
-	Size        int64
-	ContentType string
-}
-
-type File interface {
-	Metadata() FileMetadata
-	Stream() (io.ReadCloser, error)
-}
-
-type file struct {
-	metadata FileMetadata
-	stream   io.ReadCloser
-}
-
-func (f *file) Metadata() FileMetadata         { return f.metadata }
-func (f *file) Stream() (io.ReadCloser, error) { return f.stream, nil }
 
 func FileFromLocalPath(path string) (File, error) {
 	stream, err := os.Open(path)
@@ -80,14 +51,3 @@ func GenerateFileIDFromStream(stream io.Reader, originalName string) (FileID, er
 }
 
 func ExtractOriginalFileName(fileID FileID) string { return "" }
-
-// FileStore interface
-
-type FileStore interface {
-	Store(ctx context.Context, file File) (FileID, error)
-	Retrieve(ctx context.Context, fileID FileID) (File, error)
-	Delete(ctx context.Context, fileID FileID) error
-	Exists(ctx context.Context, fileID FileID) (bool, error)
-	GetPresignedURL(ctx context.Context, fileID FileID, expires time.Duration) (string, error)
-	GetURL(ctx context.Context, fileID FileID) (string, error)
-}

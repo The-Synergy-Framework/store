@@ -35,11 +35,6 @@ func NewQueryBuilder(table string) *QueryBuilder {
 	return &QueryBuilder{table: table, columns: []string{"*"}, where: []Condition{}, orderBy: []OrderBy{}, args: []interface{}{}, argIndex: 1}
 }
 
-// Insert returns a new InsertBuilder for this table.
-func (qb *QueryBuilder) Insert() *InsertBuilder {
-	return NewInsertBuilder(qb.table)
-}
-
 // InsertBuilder handles INSERT queries.
 type InsertBuilder struct {
 	table  string
@@ -296,10 +291,16 @@ type QueryExecutor struct{ db *sql.DB }
 func NewQueryExecutor(db *sql.DB) *QueryExecutor { return &QueryExecutor{db: db} }
 func (qe *QueryExecutor) Query(ctx context.Context, qb *QueryBuilder) (*sql.Rows, error) {
 	q, a := qb.Build()
+	if tx, ok := TransactionFromContext(ctx); ok && tx != nil {
+		return tx.QueryContext(ctx, q, a...)
+	}
 	return qe.db.QueryContext(ctx, q, a...)
 }
 func (qe *QueryExecutor) QueryRow(ctx context.Context, qb *QueryBuilder) *sql.Row {
 	q, a := qb.Build()
+	if tx, ok := TransactionFromContext(ctx); ok && tx != nil {
+		return tx.QueryRowContext(ctx, q, a...)
+	}
 	return qe.db.QueryRowContext(ctx, q, a...)
 }
 func (qe *QueryExecutor) Count(ctx context.Context, qb *QueryBuilder) (int64, error) {
@@ -307,6 +308,10 @@ func (qe *QueryExecutor) Count(ctx context.Context, qb *QueryBuilder) (int64, er
 	cq.where = append(cq.where, qb.where...)
 	var count int64
 	q, a := cq.Build()
+	if tx, ok := TransactionFromContext(ctx); ok && tx != nil {
+		err := tx.QueryRowContext(ctx, q, a...).Scan(&count)
+		return count, err
+	}
 	err := qe.db.QueryRowContext(ctx, q, a...).Scan(&count)
 	return count, err
 }
@@ -316,6 +321,13 @@ func (qe *QueryExecutor) Exists(ctx context.Context, qb *QueryBuilder) (bool, er
 	exq.Limit(1)
 	q, a := exq.Build()
 	var one int
+	if tx, ok := TransactionFromContext(ctx); ok && tx != nil {
+		err := tx.QueryRowContext(ctx, q, a...).Scan(&one)
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return err == nil, err
+	}
 	err := qe.db.QueryRowContext(ctx, q, a...).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
@@ -324,13 +336,46 @@ func (qe *QueryExecutor) Exists(ctx context.Context, qb *QueryBuilder) (bool, er
 }
 func (qe *QueryExecutor) ExecuteUpdate(ctx context.Context, ub *UpdateBuilder) (sql.Result, error) {
 	q, a := ub.Build()
+	if tx, ok := TransactionFromContext(ctx); ok && tx != nil {
+		return tx.ExecContext(ctx, q, a...)
+	}
 	return qe.db.ExecContext(ctx, q, a...)
 }
 func (qe *QueryExecutor) ExecuteDelete(ctx context.Context, db *DeleteBuilder) (sql.Result, error) {
 	q, a := db.Build()
+	if tx, ok := TransactionFromContext(ctx); ok && tx != nil {
+		return tx.ExecContext(ctx, q, a...)
+	}
 	return qe.db.ExecContext(ctx, q, a...)
 }
 func (qe *QueryExecutor) ExecuteInsert(ctx context.Context, ib *InsertBuilder) (sql.Result, error) {
 	q, a := ib.ToSQL()
+	if tx, ok := TransactionFromContext(ctx); ok && tx != nil {
+		return tx.ExecContext(ctx, q, a...)
+	}
 	return qe.db.ExecContext(ctx, q, a...)
+}
+
+// ExecuteCompiled provides execution for compiled SQL.
+func (qe *QueryExecutor) ExecuteCompiled(ctx context.Context, c *CompiledSQL) (*sql.Rows, error) {
+	if tx, ok := TransactionFromContext(ctx); ok && tx != nil {
+		return tx.QueryContext(ctx, c.SQL, c.Args...)
+	}
+	return qe.db.QueryContext(ctx, c.SQL, c.Args...)
+}
+
+// ExecuteCompiledRow runs a compiled SQL expected to return a single row.
+func (qe *QueryExecutor) ExecuteCompiledRow(ctx context.Context, c *CompiledSQL) *sql.Row {
+	if tx, ok := TransactionFromContext(ctx); ok && tx != nil {
+		return tx.QueryRowContext(ctx, c.SQL, c.Args...)
+	}
+	return qe.db.QueryRowContext(ctx, c.SQL, c.Args...)
+}
+
+// ExecuteCompiledExec runs a compiled SQL that doesn't return rows.
+func (qe *QueryExecutor) ExecuteCompiledExec(ctx context.Context, c *CompiledSQL) (sql.Result, error) {
+	if tx, ok := TransactionFromContext(ctx); ok && tx != nil {
+		return tx.ExecContext(ctx, c.SQL, c.Args...)
+	}
+	return qe.db.ExecContext(ctx, c.SQL, c.Args...)
 }

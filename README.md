@@ -21,12 +21,110 @@ Multi-backend persistent storage with repository patterns and cursor-based pagin
 - `store/kv`: Key-value store support with pattern matching and expiration
   - `store/kv/adapter`: KV adapters (Memory, Redis, Etcd)
   - `store/kv/repository`: KV-specific repository implementation
-- `store/filestore`: File storage abstraction
-  - `store/filestore/filesystem`: Local filesystem implementation
-  - `store/filestore/s3`: AWS S3 implementation (planned)
-  - `store/filestore/ipfs`: IPFS implementation (planned)
+- `store/files`: File storage abstraction with repository pattern
+  - `store/files/adapter`: File storage adapters (filesystem, planned: S3, IPFS)
+  - `store/files/repository`: High-level repository for file operations
 
-### Quickstart (SQL + Repository Pattern)
+## Quick Start
+
+### SQL with Environment Configuration
+
+The simplest way to get started is using environment variables:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	"core/entity"
+	"store"
+	sqlstore "store/sql"
+)
+
+func main() {
+	// Set environment variables
+	os.Setenv("DB_TYPE", "postgres")
+	os.Setenv("DB_HOST", "localhost")
+	os.Setenv("DB_PORT", "5432")
+	os.Setenv("DB_USERNAME", "postgres")
+	os.Setenv("DB_PASSWORD", "password")
+	os.Setenv("DB_NAME", "myapp")
+
+	ctx := context.Background()
+
+	// Create service from environment
+	svc, err := sqlstore.OpenFromEnv(ctx)
+	if err != nil {
+		log.Fatalf("failed to connect: %v", err)
+	}
+	defer svc.Close()
+
+	// Create repository and use transactions
+	userRepo := svc.NewRepository(&User{})
+	err = store.RunTx(ctx, svc.Transactor(), func(ctx context.Context) error {
+		user := &User{
+			BaseEntity: entity.NewBaseEntity(),
+			Name:       "John Doe",
+			Email:      "john@example.com",
+		}
+		return userRepo.Create(ctx, user)
+	})
+	if err != nil {
+		log.Fatalf("transaction failed: %v", err)
+	}
+}
+```
+
+### Files with Environment Configuration
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	"strings"
+
+	"store"
+	"store/files/adapter"
+)
+
+func main() {
+	// Set environment variables
+	os.Setenv("FILES_ROOT", "./uploads")
+	os.Setenv("FILES_MAX_SIZE", "10485760") // 10MB
+
+	ctx := context.Background()
+
+	// Create files repository from environment
+	repo, err := adapter.OpenRepositoryFromEnv()
+	if err != nil {
+		log.Fatalf("failed to open files: %v", err)
+	}
+
+	// Save a file
+	content := "Hello, World!"
+	id, metadata, err := repo.SaveBytes(ctx, "hello.txt", []byte(content), "text/plain")
+	if err != nil {
+		log.Fatalf("failed to save file: %v", err)
+	}
+	log.Printf("saved file %s: %+v", id, metadata)
+
+	// List files with pagination
+	params := store.CursorParams{PageSize: 10}
+	result, err := repo.List(ctx, params)
+	if err != nil {
+		log.Fatalf("failed to list files: %v", err)
+	}
+	log.Printf("found %d files", len(result.Items))
+}
+```
+
+### Manual Configuration (SQL + Repository Pattern)
 
 ```go
 package main
@@ -229,55 +327,64 @@ package main
 import (
 	"context"
 	"log"
-	"os"
+	"strings"
+	"time"
 
 	"store"
-	"store/filestore"
-	"store/filestore/filesystem"
+	"store/files/adapter"
 )
 
 func main() {
 	ctx := context.Background()
 
-	// 1) Create filesystem file store
-	config := &filesystem.Config{
-		RootPath: "/tmp/store",
-		BaseURL:  "http://localhost:8080/files",
+	// 1) Create filesystem repository
+	config := adapter.FilesystemConfig{
+		Root:      "/tmp/store",
+		BaseURL:   "http://localhost:8080/files",
+		MaxFileSize: 10 * 1024 * 1024, // 10MB
+		ChunkSize:   2 * 1024 * 1024,  // 2MB chunks
 	}
 
-	fileStore, err := filesystem.New(config)
+	repo, err := adapter.OpenRepository(config)
 	if err != nil {
-		log.Fatalf("failed to create file store: %v", err)
+		log.Fatalf("failed to create files repository: %v", err)
 	}
 
-	// 2) File operations
-	fileID := store.NewFileID()
-	file := &store.BasicFile{
-		ID:          fileID,
-		Filename:    "document.pdf",
-		ContentType: "application/pdf",
-		Size:        1024,
-		Path:        "/documents/document.pdf",
+	// 2) Save a file from content
+	content := strings.NewReader("This is a test document content")
+	fileID, metadata, err := repo.Save(ctx, "document.txt", content, "text/plain")
+	if err != nil {
+		log.Fatalf("failed to save file: %v", err)
 	}
+	log.Printf("saved file %s: %+v", fileID, metadata)
 
-	// Store file metadata
-	if err := fileStore.Store(ctx, file); err != nil {
-		log.Fatalf("failed to store file: %v", err)
-	}
-
-	// Get file metadata
-	retrieved, err := fileStore.Get(ctx, fileID)
+	// 3) Get file content
+	reader, metadata, err := repo.Get(ctx, fileID)
 	if err != nil {
 		log.Fatalf("failed to get file: %v", err)
 	}
-	log.Printf("file: %s (%d bytes)", retrieved.Filename, retrieved.Size)
+	defer reader.Close()
+	log.Printf("file metadata: %+v", metadata)
 
-	// Generate presigned URL for download
-	url, err := fileStore.PresignedURL(ctx, fileID, "GET", 1*time.Hour)
+	// 4) List files with pagination
+	params := store.CursorParams{PageSize: 10}
+	result, err := repo.List(ctx, params)
+	if err != nil {
+		log.Fatalf("failed to list files: %v", err)
+	}
+	log.Printf("found %d files", len(result.Items))
+
+	// 5) Generate presigned URL for download
+	url, err := repo.PresignedURL(ctx, fileID, 1*time.Hour)
 	if err != nil {
 		log.Fatalf("failed to generate presigned URL: %v", err)
 	}
 	log.Printf("download URL: %s", url)
+
+	// 6) Clean up
+	if err := repo.Delete(ctx, fileID); err != nil {
+		log.Fatalf("failed to delete file: %v", err)
+	}
 }
 ```
 

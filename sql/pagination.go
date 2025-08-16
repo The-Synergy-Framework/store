@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strconv"
 
 	"store"
 )
@@ -28,27 +27,29 @@ func NewSQLPaginatorWithConfig(config store.PaginationConfig) *SQLPaginator {
 	}
 }
 
-// ApplyToQueryBuilder applies cursor pagination parameters to a QueryBuilder.
-// For SQL, we'll use LIMIT and WHERE clauses based on the cursor.
+// ApplyToQueryBuilder applies cursor pagination parameters to a QueryBuilder using keyset pagination.
+// Assumes ordering by created_at ASC, id ASC. Adjust as needed per repository.
 func (p *SQLPaginator) ApplyToQueryBuilder(qb *QueryBuilder, params store.CursorParams) *QueryBuilder {
-	// Apply page size limit
 	qb = qb.Limit(int(params.PageSize))
-
-	// If we have a cursor, apply WHERE clause for cursor-based pagination
-	if params.Cursor != "" {
-		cursor, err := p.DecodeCursor(params.Cursor)
-		if err == nil && cursor != nil {
-			// Use the last item's timestamp and ID for cursor-based pagination
-			// This assumes items are ordered by timestamp (created_at) and then by ID
-			// For now, use a simple timestamp-based cursor until we implement compound cursors
-			qb = qb.Where("created_at", "<", cursor.LastTimestamp)
-		}
+	if params.Cursor == "" {
+		return qb
 	}
-
+	cursor, err := p.DecodeCursor(params.Cursor)
+	if err != nil || cursor == nil {
+		return qb
+	}
+	// For ASC order: (created_at > last_ts) OR (created_at = last_ts AND id > last_id)
+	condA := Condition{Column: fmt.Sprintf("created_at > $%d", qb.argIndex)}
+	qb.args = append(qb.args, cursor.LastTimestamp)
+	qb.argIndex++
+	condB := Condition{Column: fmt.Sprintf("(created_at = $%d AND id > $%d)", qb.argIndex, qb.argIndex+1)}
+	qb.args = append(qb.args, cursor.LastTimestamp, cursor.LastID)
+	qb.argIndex += 2
+	qb.where = append(qb.where, Condition{Column: fmt.Sprintf("(%s OR %s)", condA.Column, condB.Column)})
 	return qb
 }
 
-// ExecutePaginatedQuery executes a cursor-based paginated query.
+// ExecutePaginatedQuery executes a cursor-based paginated query (keyset pagination).
 func ExecutePaginatedQuery[T any](
 	ctx context.Context,
 	p *SQLPaginator,
@@ -57,17 +58,14 @@ func ExecutePaginatedQuery[T any](
 	params store.CursorParams,
 	scanFunc func(*sql.Rows) (T, error),
 ) (store.CursorResult[T], error) {
-	// Apply pagination to the query builder
 	paginatedQb := p.ApplyToQueryBuilder(qb, params)
 
-	// Execute the query
 	rows, err := qe.Query(ctx, paginatedQb)
 	if err != nil {
 		return store.CursorResult[T]{}, err
 	}
 	defer rows.Close()
 
-	// Scan results using the provided scan function
 	var items []T
 	for rows.Next() {
 		item, err := scanFunc(rows)
@@ -76,24 +74,18 @@ func ExecutePaginatedQuery[T any](
 		}
 		items = append(items, item)
 	}
-
 	if err := rows.Err(); err != nil {
 		return store.CursorResult[T]{}, err
 	}
 
-	// Determine if there are more pages
-	hasMore := len(items) == int(params.PageSize)
-
-	// Get total count (without pagination) - this is optional for cursor-based pagination
-	var totalCount int64 = -1 // -1 indicates unknown
+	hasMore := int32(len(items)) == params.PageSize
+	var totalCount int64 = -1
 	if params.Cursor == "" {
-		// Only get total count for first page
 		if count, err := qe.Count(ctx, qb); err == nil {
 			totalCount = count
 		}
 	}
 
-	// Build cursor result
 	result := store.BuildCursorResult(p.Paginator, items, params.PageSize, hasMore, totalCount)
 	return result, nil
 }
@@ -108,9 +100,7 @@ type PaginationResult struct {
 }
 
 // Legacy constructor for backward compatibility
-func NewPagination() *SQLPaginator {
-	return NewSQLPaginator()
-}
+func NewPagination() *SQLPaginator { return NewSQLPaginator() }
 
 // Legacy method for backward compatibility
 func (p *SQLPaginator) ExecutePaginatedQueryWithScan(
@@ -124,39 +114,19 @@ func (p *SQLPaginator) ExecutePaginatedQueryWithScan(
 	if err != nil {
 		return nil, err
 	}
-
-	// Convert cursor result to legacy format
 	legacyResult := &PaginationResult{
 		Items:         make([]interface{}, len(result.Items)),
 		NextPageToken: result.NextCursor,
 		TotalCount:    result.TotalCount,
 		HasMore:       result.HasMore,
 	}
-
-	// Convert items to interface{}
 	for i, item := range result.Items {
 		legacyResult.Items[i] = item
 	}
-
 	return legacyResult, nil
 }
 
 // LegacyParseParams converts legacy page token to cursor params (deprecated).
 func (p *SQLPaginator) LegacyParseParams(pageSize int32, pageToken string) store.CursorParams {
-	// For backward compatibility, try to parse old offset-based tokens
-	if pageToken != "" {
-		if offset, err := strconv.Atoi(pageToken); err == nil && offset >= 0 {
-			// Convert offset to approximate cursor (this is not ideal but maintains compatibility)
-			// In production, you should migrate to proper cursor-based pagination
-			return store.CursorParams{
-				PageSize: pageSize,
-				Cursor:   fmt.Sprintf("legacy_offset_%d", offset),
-			}
-		}
-	}
-
-	return store.CursorParams{
-		PageSize: pageSize,
-		Cursor:   pageToken,
-	}
+	return store.CursorParams{PageSize: pageSize, Cursor: pageToken}
 }

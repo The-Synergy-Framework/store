@@ -3,6 +3,8 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"os"
+	"strconv"
 	"time"
 
 	"core/entity"
@@ -36,7 +38,6 @@ func (s *Service) Connect(ctx context.Context) error {
 		return store.WrapConnectionError(err, "connect", s.adapter.Name(), s.config.Host)
 	}
 
-	// Configure connection pool
 	if s.config.MaxOpenConns > 0 {
 		db.SetMaxOpenConns(s.config.MaxOpenConns)
 	}
@@ -50,7 +51,6 @@ func (s *Service) Connect(ctx context.Context) error {
 		db.SetConnMaxIdleTime(s.config.ConnMaxIdleTime)
 	}
 
-	// Test connection
 	pingCtx := ctx
 	var cancel context.CancelFunc
 	if s.config.ConnectTimeout > 0 {
@@ -118,6 +118,11 @@ func (s *Service) TransactionHandler() *TransactionHandler {
 	return NewTransactionHandler(s.db, s.Adapter())
 }
 
+// Transactor returns a backend-agnostic transaction runner.
+func (s *Service) Transactor() store.Transactor {
+	return s.TransactionHandler()
+}
+
 // ExecuteSQL executes raw SQL (for migrations, table creation, etc.).
 func (s *Service) ExecuteSQL(ctx context.Context, query string, args ...interface{}) error {
 	_, err := s.db.ExecContext(ctx, query, args...)
@@ -154,4 +159,80 @@ func OpenWithName(ctx context.Context, adapterName string, config *adapter.Confi
 	}
 
 	return Open(ctx, adpt, config)
+}
+
+// OpenFromEnv creates and connects a new SQL service using environment variables.
+// Uses DB_TYPE (required), DB_HOST, DB_PORT, DB_USERNAME, DB_PASSWORD, DB_NAME, DB_SSL_MODE,
+// DB_MAX_OPEN_CONNS, DB_MAX_IDLE_CONNS, DB_CONN_MAX_LIFETIME, DB_CONNECT_TIMEOUT.
+func OpenFromEnv(ctx context.Context) (*Service, error) {
+	dbType := os.Getenv("DB_TYPE")
+	if dbType == "" {
+		return nil, store.WrapDriverError(
+			store.ErrDriverNotFound,
+			"env", "DB_TYPE environment variable is required")
+	}
+
+	config := &adapter.Config{
+		BaseConfig: store.BaseConfig{
+			Type:     dbType,
+			Host:     getEnvOr("DB_HOST", "localhost"),
+			Username: os.Getenv("DB_USERNAME"),
+			Password: os.Getenv("DB_PASSWORD"),
+		},
+		DBName:  os.Getenv("DB_NAME"),
+		SSLMode: getEnvOr("DB_SSL_MODE", "prefer"),
+	}
+
+	// Parse port
+	if portStr := os.Getenv("DB_PORT"); portStr != "" {
+		if port, err := strconv.Atoi(portStr); err == nil {
+			config.Port = port
+		}
+	}
+
+	// Parse connection pool settings
+	if maxOpenStr := os.Getenv("DB_MAX_OPEN_CONNS"); maxOpenStr != "" {
+		if maxOpen, err := strconv.Atoi(maxOpenStr); err == nil {
+			config.MaxOpenConns = maxOpen
+		}
+	}
+
+	if maxIdleStr := os.Getenv("DB_MAX_IDLE_CONNS"); maxIdleStr != "" {
+		if maxIdle, err := strconv.Atoi(maxIdleStr); err == nil {
+			config.MaxIdleConns = maxIdle
+		}
+	}
+
+	// Parse timeouts
+	if lifetimeStr := os.Getenv("DB_CONN_MAX_LIFETIME"); lifetimeStr != "" {
+		if lifetime, err := time.ParseDuration(lifetimeStr); err == nil {
+			config.ConnMaxLifetime = lifetime
+		}
+	}
+
+	if timeoutStr := os.Getenv("DB_CONNECT_TIMEOUT"); timeoutStr != "" {
+		if timeout, err := time.ParseDuration(timeoutStr); err == nil {
+			config.ConnectTimeout = timeout
+		}
+	}
+
+	return OpenWithName(ctx, dbType, config)
+}
+
+// MustOpenFromEnv creates and connects a new SQL service using environment variables.
+// Panics if the connection fails. Use for applications where database connectivity
+// is essential and failure should halt startup.
+func MustOpenFromEnv(ctx context.Context) *Service {
+	svc, err := OpenFromEnv(ctx)
+	if err != nil {
+		panic("failed to open database from environment: " + err.Error())
+	}
+	return svc
+}
+
+func getEnvOr(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }

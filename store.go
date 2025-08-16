@@ -57,6 +57,17 @@ type Countable interface {
 	Count(ctx context.Context) (int64, error)
 }
 
+// Transactor provides a backend-agnostic transaction execution contract.
+// Implementations may be no-ops if the backend does not support transactions.
+type Transactor interface {
+	// WithTx executes fn within a read-write transaction when supported.
+	// The provided context may carry a backend-specific transaction handle.
+	WithTx(ctx context.Context, fn func(context.Context) error) error
+
+	// WithReadTx executes fn within a read-only transaction when supported.
+	WithReadTx(ctx context.Context, fn func(context.Context) error) error
+}
+
 // Connection represents a generic connection interface.
 type Connection interface {
 	Ping(ctx context.Context) error
@@ -77,30 +88,6 @@ type Registry interface {
 	Register(name string, factory func() Adapter)
 	List() []string
 	Exists(name string) bool
-}
-
-// FileStore defines the interface for file storage operations.
-type FileStore interface {
-	// Store saves a file and returns its ID and metadata
-	Store(ctx context.Context, file File) (FileID, *FileMetadata, error)
-
-	// Retrieve gets a file by ID
-	Retrieve(ctx context.Context, id FileID) (File, error)
-
-	// Delete removes a file by ID
-	Delete(ctx context.Context, id FileID) error
-
-	// Exists checks if a file exists
-	Exists(ctx context.Context, id FileID) (bool, error)
-
-	// GetMetadata returns file metadata without the content
-	GetMetadata(ctx context.Context, id FileID) (*FileMetadata, error)
-
-	// List returns files with pagination
-	List(ctx context.Context, pageSize int32, pageToken string) ([]FileMetadata, string, error)
-
-	// GeneratePresignedURL creates a temporary URL for file access (if supported)
-	GeneratePresignedURL(ctx context.Context, id FileID, expiration time.Duration) (string, error)
 }
 
 // File represents a file with its content and metadata.
@@ -275,4 +262,16 @@ func (r *RepositoryBase) HandleBatchError(err error, operation string, items int
 		return WrapQueryError(err, operation, r.EntityName(), "", []any{items})
 	}
 	return nil
+}
+
+// RunTx executes fn within a read-write transaction when supported.
+// This is a convenience helper that delegates to the Transactor interface.
+func RunTx(ctx context.Context, tx Transactor, fn func(context.Context) error) error {
+	return tx.WithTx(ctx, fn)
+}
+
+// RunReadTx executes fn within a read-only transaction when supported.
+// This is a convenience helper that delegates to the Transactor interface.
+func RunReadTx(ctx context.Context, tx Transactor, fn func(context.Context) error) error {
+	return tx.WithReadTx(ctx, fn)
 }
