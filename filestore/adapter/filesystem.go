@@ -19,14 +19,14 @@ import (
 	"store/filestore"
 )
 
-// FilesystemConfig configures the filesystem adapter.
+// FilesystemConfig configures the filesystem filestore.
 type FilesystemConfig struct {
 	Root      string
 	BaseURL   string
 	SecretKey string
 }
 
-// filesystemAdapter implements Adapter directly with filesystem logic.
+// filesystemAdapter implements filestore.FileStore directly.
 type filesystemAdapter struct {
 	root        string
 	baseURL     string
@@ -34,8 +34,20 @@ type filesystemAdapter struct {
 	httpHandler http.Handler
 }
 
-func (a *filesystemAdapter) Name() string { return "filesystem" }
+// NewFilesystem creates a filesystem filestore from config.
+func NewFilesystem(cfg FilesystemConfig) filestore.FileStore {
+	ad := &filesystemAdapter{
+		root:      cfg.Root,
+		baseURL:   cfg.BaseURL,
+		secretKey: cfg.SecretKey,
+	}
+	if cfg.BaseURL != "" {
+		ad.httpHandler = http.StripPrefix("/files/", http.FileServer(http.Dir(cfg.Root)))
+	}
+	return ad
+}
 
+// FileStore interface implementation
 func (a *filesystemAdapter) Store(ctx context.Context, f filestore.File) (filestore.FileID, error) {
 	md := f.Metadata()
 	stream, err := f.Stream()
@@ -124,8 +136,6 @@ func (a *filesystemAdapter) GetURL(ctx context.Context, id filestore.FileID) (st
 	return fmt.Sprintf("%s/files/%s", strings.TrimSuffix(a.baseURL, "/"), id), nil
 }
 
-func (a *filesystemAdapter) Close() error { return nil }
-
 // Helper methods
 func (a *filesystemAdapter) pathFor(id filestore.FileID) string {
 	return filepath.Join(a.root, string(id))
@@ -145,19 +155,6 @@ func (a *filesystemAdapter) generateSignature(path, timestamp string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// NewFilesystem creates a filesystem adapter from config.
-func NewFilesystem(cfg FilesystemConfig) Adapter {
-	ad := &filesystemAdapter{
-		root:      cfg.Root,
-		baseURL:   cfg.BaseURL,
-		secretKey: cfg.SecretKey,
-	}
-	if cfg.BaseURL != "" {
-		ad.httpHandler = http.StripPrefix("/files/", http.FileServer(http.Dir(cfg.Root)))
-	}
-	return ad
-}
-
 // fileAdapter implements filestore.File
 type fileAdapter struct {
 	metadata filestore.FileMetadata
@@ -167,9 +164,7 @@ type fileAdapter struct {
 func (f *fileAdapter) Metadata() filestore.FileMetadata { return f.metadata }
 func (f *fileAdapter) Stream() (io.ReadCloser, error)   { return f.stream, nil }
 
-func init() {
-	Register("filesystem", func(config interface{}) (Adapter, error) {
-		cfg, _ := config.(FilesystemConfig)
-		return NewFilesystem(cfg), nil
-	})
+// Open creates a new filesystem filestore with the given configuration.
+func Open(cfg FilesystemConfig) filestore.FileStore {
+	return NewFilesystem(cfg)
 }
