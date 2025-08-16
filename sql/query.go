@@ -35,50 +35,6 @@ func NewQueryBuilder(table string) *QueryBuilder {
 	return &QueryBuilder{table: table, columns: []string{"*"}, where: []Condition{}, orderBy: []OrderBy{}, args: []interface{}{}, argIndex: 1}
 }
 
-// InsertBuilder handles INSERT queries.
-type InsertBuilder struct {
-	table  string
-	values map[string]interface{}
-}
-
-// NewInsertBuilder creates a new insert builder.
-func NewInsertBuilder(table string) *InsertBuilder {
-	return &InsertBuilder{
-		table:  table,
-		values: make(map[string]interface{}),
-	}
-}
-
-// Values sets the values to insert.
-func (ib *InsertBuilder) Values(values map[string]interface{}) *InsertBuilder {
-	ib.values = values
-	return ib
-}
-
-// ToSQL generates the INSERT SQL statement.
-func (ib *InsertBuilder) ToSQL() (string, []interface{}) {
-	if len(ib.values) == 0 {
-		return "", nil
-	}
-
-	var columns []string
-	var placeholders []string
-	var args []interface{}
-
-	for col, val := range ib.values {
-		columns = append(columns, col)
-		placeholders = append(placeholders, "?")
-		args = append(args, val)
-	}
-
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-		ib.table,
-		strings.Join(columns, ", "),
-		strings.Join(placeholders, ", "))
-
-	return query, args
-}
-
 func (qb *QueryBuilder) Select(columns ...string) *QueryBuilder {
 	if len(columns) > 0 {
 		qb.columns = columns
@@ -343,13 +299,6 @@ func (qe *QueryExecutor) ExecuteUpdate(ctx context.Context, ub *UpdateBuilder) (
 }
 func (qe *QueryExecutor) ExecuteDelete(ctx context.Context, db *DeleteBuilder) (sql.Result, error) {
 	q, a := db.Build()
-	if tx, ok := TransactionFromContext(ctx); ok && tx != nil {
-		return tx.ExecContext(ctx, q, a...)
-	}
-	return qe.db.ExecContext(ctx, q, a...)
-}
-func (qe *QueryExecutor) ExecuteInsert(ctx context.Context, ib *InsertBuilder) (sql.Result, error) {
-	q, a := ib.ToSQL()
 	if tx, ok := TransactionFromContext(ctx); ok && tx != nil {
 		return tx.ExecContext(ctx, q, a...)
 	}

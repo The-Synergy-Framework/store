@@ -25,6 +25,7 @@ type Cursor struct {
 type CursorParams struct {
 	PageSize int32  // Number of items per page
 	Cursor   string // Encoded cursor string (empty for first page)
+	Backward bool   // When true, paginate backward (older items when ordering ascending)
 }
 
 // CursorResult holds the result of a cursor-based paginated query.
@@ -71,7 +72,6 @@ func NewPaginatorWithConfig(config PaginationConfig) *Paginator {
 
 // ParseParams parses and validates cursor pagination parameters.
 func (p *Paginator) ParseParams(pageSize int32, cursor string) CursorParams {
-	// Validate and normalize page size
 	if pageSize <= 0 {
 		pageSize = p.config.DefaultPageSize
 	}
@@ -243,10 +243,7 @@ func BuildCursorResult[T any](
 		}
 	}
 
-	// Generate previous cursor if this isn't the first page
-	// Note: This requires the original cursor to be available in the calling context
-	// For now, we'll leave it empty and let the caller handle it
-
+	// PreviousCursor is set by backend-specific paginators when params.Cursor != ""
 	return result
 }
 

@@ -177,12 +177,6 @@ func (r *Repository) Update() *UpdateBuilder { return NewUpdateBuilder(r.tableNa
 // NewDeleteBuilder creates a new delete builder for this entity's table.
 func (r *Repository) Delete() *DeleteBuilder { return NewDeleteBuilder(r.tableName) }
 
-// ExecutePaginatedQuery executes a paginated query with custom scanning (legacy support).
-func (r *Repository) ExecutePaginatedQuery(ctx context.Context, qb *QueryBuilder, pageSize int32, pageToken string, scanFunc func(*sql.Rows) (any, error)) (*PaginationResult, error) {
-	params := r.paginator.ParseParams(pageSize, pageToken)
-	return r.paginator.ExecutePaginatedQueryWithScan(ctx, r.queryExecutor, qb, params, scanFunc)
-}
-
 // Scanning helpers using core/entity
 
 // scanRow scans a single row into a new entity instance.

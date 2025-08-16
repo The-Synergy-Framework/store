@@ -90,6 +90,7 @@ import (
 	"strings"
 
 	"store"
+	"store/files"
 	"store/files/adapter"
 )
 
@@ -106,13 +107,27 @@ func main() {
 		log.Fatalf("failed to open files: %v", err)
 	}
 
-	// Save a file
+	// Save from bytes
 	content := "Hello, World!"
-	id, metadata, err := repo.SaveBytes(ctx, "hello.txt", []byte(content), "text/plain")
+	id, md, err := repo.SaveBytes(ctx, "hello.txt", []byte(content), "text/plain")
 	if err != nil {
-		log.Fatalf("failed to save file: %v", err)
+		log.Fatalf("failed to save bytes: %v", err)
 	}
-	log.Printf("saved file %s: %+v", id, metadata)
+	log.Printf("saved file %s: %+v", id, md)
+
+	// Save from reader
+	readerID, md2, err := repo.Save(ctx, "greeting.txt", strings.NewReader("Hi!"), "text/plain")
+	if err != nil {
+		log.Fatalf("failed to save reader: %v", err)
+	}
+	log.Printf("saved file %s: %+v", readerID, md2)
+
+	// Save from local path using files helpers
+	fileID, md3, err := repo.SavePath(ctx, "./README.md")
+	if err != nil {
+		log.Fatalf("failed to save path: %v", err)
+	}
+	log.Printf("saved local file %s: %+v", fileID, md3)
 
 	// List files with pagination
 	params := store.CursorParams{PageSize: 10}
@@ -121,6 +136,13 @@ func main() {
 		log.Fatalf("failed to list files: %v", err)
 	}
 	log.Printf("found %d files", len(result.Items))
+
+	// Low-level helper: build File from local path (if needed)
+	f, err := files.FileFromLocalPath("./README.md")
+	if err != nil {
+		log.Fatalf("failed to open local file: %v", err)
+	}
+	_ = f // can pass to adapters directly if needed
 }
 ```
 
